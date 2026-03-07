@@ -1,6 +1,6 @@
 {
-  "name": "cursorcli",
-  "module": "index.ts",
+  "name": "creed-cli",
+  "module": "src/index.ts",
   "type": "module",
   "private": true,
   "devDependencies": {
