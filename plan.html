@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Coding CLI Development Plan</title>
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+    </script>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --text-color: #f8fafc;
+            --primary-color: #38bdf8;
+            --secondary-color: #818cf8;
+            --card-bg: #1e293b;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.6;
+            margin: 0;
+            padding: 2rem;
+        }
+        max-width {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1, h2, h3 {
+            color: var(--primary-color);
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        .card {
+            background-color: var(--card-bg);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        ul {
+            list-style-type: square;
+        }
+        li {
+            margin-bottom: 0.5rem;
+        }
+        .mermaid {
+            background-color: #1e293b;
+            padding: 1rem;
+            border-radius: 8px;
+            display: flex;
+            justify-content: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 AI Coding CLI Architecture & Plan</h1>
+        <p>A comprehensive plan for building a natural language coding CLI using <strong>TypeScript</strong> and <strong>Bun</strong>.</p>
+
+        <div class="card">
+            <h2>1. Core Architecture & Tech Stack</h2>
+            <ul>
+                <li><strong>Runtime & Package Manager:</strong> Bun (for ultra-fast startup times and native TS support).</li>
+                <li><strong>Language:</strong> TypeScript (strict typing for robustness).</li>
+                <li><strong>CLI Framework:</strong> <code>commander</code> or <code>clack</code> for elegant terminal UI.</li>
+                <li><strong>LLM Integration:</strong> Official SDKs (e.g., <code>@google/genai</code>, OpenAI SDK) for tool calling and reasoning.</li>
+                <li><strong>File System:</strong> Bun's native <code>Bun.file()</code> and standard Node <code>fs/promises</code>.</li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2>2. Sub-Agent System Design</h2>
+            <p>To keep the main context window lean and handle complex tasks, the CLI will delegate work to specialized sub-agents:</p>
+            <ul>
+                <li><strong>Orchestrator (Main Agent):</strong> Handles user input, maintains session history, and routes tasks to tools or sub-agents.</li>
+                <li><strong>Investigator Agent:</strong> Specializes in navigating the codebase, reading files, and summarizing architecture (using `glob`, `grep`, `read_file`).</li>
+                <li><strong>Coder Agent:</strong> Focuses purely on writing, replacing, and refactoring code based on specific instructions.</li>
+                <li><strong>Runner/Terminal Agent:</strong> Executes shell commands (tests, builds, lints) and analyzes the output for errors.</li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2>3. Development Phases</h2>
+            <h3>Phase 1: CLI Setup & Basic Loop</h3>
+            <ul>
+                <li>Initialize Bun + TS project.</li>
+                <li>Set up REPL (Read-Eval-Print Loop) using standard input/output.</li>
+                <li>Integrate basic LLM API call with a placeholder system prompt.</li>
+            </ul>
+
+            <h3>Phase 2: Tooling Infrastructure</h3>
+            <ul>
+                <li>Parse the provided <code>tool.json</code> to register available functions with the LLM.</li>
+                <li>Implement core tools locally: <code>read_file</code>, <code>write_file</code>, <code>run_shell_command</code>.</li>
+                <li>Implement tool execution dispatcher to handle LLM tool calls and return results.</li>
+            </ul>
+
+            <h3>Phase 3: Multi-Agent Orchestration</h3>
+            <ul>
+                <li>Implement Sub-Agent routing logic.</li>
+                <li>Define specific system prompts for Investigator, Coder, and Runner agents.</li>
+                <li>Create communication bridge so Sub-Agents can return summaries back to the Orchestrator.</li>
+            </ul>
+
+            <h3>Phase 4: Advanced Features & Polish</h3>
+            <ul>
+                <li>Implement streaming responses for better UX.</li>
+                <li>Add context management (truncating old history to save tokens).</li>
+                <li>Integrate custom system prompts.</li>
+                <li>Add terminal UI elements (spinners, colors, markdown rendering).</li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2>4. Architecture Flow Graph</h2>
+            <div class="mermaid">
+                graph TD
+                    User((User)) -->|Natural Language| CLI[CLI Entrypoint / UI]
+                    CLI --> Orchestrator[Orchestrator Agent]
+                    
+                    subgraph Multi-Agent System
+                        Orchestrator -->|Delegates Task| Routing{Task Type?}
+                        Routing -->|Codebase Analysis| Investigator[Investigator Agent]
+                        Routing -->|Implementation/Fix| Coder[Coder Agent]
+                        Routing -->|Testing/Execution| Runner[Runner Agent]
+                    end
+                    
+                    subgraph Tools layer
+                        Investigator --> ToolRead[read_file / grep]
+                        Coder --> ToolWrite[write_file / replace]
+                        Runner --> ToolShell[run_shell_command]
+                        
+                        Orchestrator --> ToolGeneric[All Tools]
+                    end
+                    
+                    ToolRead --> FS[(File System)]
+                    ToolWrite --> FS
+                    ToolShell --> OS[Operating System]
+                    
+                    Investigator -.->|Summary| Orchestrator
+                    Coder -.->|Diff/Result| Orchestrator
+                    Runner -.->|Logs/Exit Code| Orchestrator
+                    
+                    Orchestrator -->|Final Response| CLI
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Next Steps</h2>
+            <p>1. Review this plan and the architecture graph.</p>
+            <p>2. Provide your <code>tool.json</code> file so we can start mapping out the exact tool interfaces.</p>
+            <p>3. Let me know when you are ready to start coding the Phase 1 setup!</p>
+        </div>
+    </div>
+</body>
+</html>

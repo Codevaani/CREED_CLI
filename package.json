@@ -1,0 +1,17 @@
+{
+  "name": "cursorcli",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "commander": "^14.0.3",
+    "openai": "^6.27.0",
+    "picocolors": "^1.1.1"
+  }
+}
