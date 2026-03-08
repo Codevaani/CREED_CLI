@@ -2,8 +2,11 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
+export type RuntimeProvider = "openai-compatible" | "anthropic-compatible";
+
 export interface CliSettingsInput {
   runtime?: {
+    provider?: RuntimeProvider;
     model?: string;
     baseUrl?: string;
     apiKey?: string;
@@ -24,6 +27,7 @@ export interface CliSettingsInput {
 
 export interface ResolvedCliSettings {
   runtime: {
+    provider: RuntimeProvider;
     model: string;
     baseUrl: string;
     apiKey: string;
@@ -49,6 +53,13 @@ export interface RuntimeSettingsStatus {
   isConfigured: boolean;
 }
 
+export interface PersistedRuntimeSettings {
+  provider: RuntimeProvider;
+  model: string;
+  baseUrl: string;
+  apiKey: string;
+}
+
 interface CachedSettingsSnapshot {
   envKey: string;
   settings: ResolvedCliSettings;
@@ -58,6 +69,7 @@ interface CachedSettingsSnapshot {
 
 const DEFAULT_SETTINGS: ResolvedCliSettings = {
   runtime: {
+    provider: "openai-compatible",
     model: "",
     baseUrl: "",
     apiKey: "",
@@ -149,6 +161,7 @@ function normalizeSettingsShape(raw: Record<string, unknown>): CliSettingsInput 
 
   if (typeof raw.model === "string" || typeof raw.baseUrl === "string" || typeof raw.apiKey === "string") {
     normalized.runtime = {
+      provider: raw.provider === "anthropic-compatible" ? "anthropic-compatible" : undefined,
       model: typeof raw.model === "string" ? raw.model : undefined,
       baseUrl: typeof raw.baseUrl === "string" ? raw.baseUrl : undefined,
       apiKey: typeof raw.apiKey === "string" ? raw.apiKey : undefined,
@@ -188,6 +201,10 @@ function normalizeSettingsShape(raw: Record<string, unknown>): CliSettingsInput 
   if (isRecord(raw.runtime)) {
     normalized.runtime = {
       ...normalized.runtime,
+      provider:
+        raw.runtime.provider === "openai-compatible" || raw.runtime.provider === "anthropic-compatible"
+          ? raw.runtime.provider
+          : normalized.runtime?.provider,
       model: typeof raw.runtime.model === "string" ? raw.runtime.model : normalized.runtime?.model,
       baseUrl:
         typeof raw.runtime.baseUrl === "string" ? raw.runtime.baseUrl : normalized.runtime?.baseUrl,
@@ -262,8 +279,16 @@ function readSettingsFile(filePath: string, warnings: string[]) {
   }
 }
 
+export function getUserSettingsPath() {
+  return path.join(os.homedir(), ".creed", "settings.json");
+}
+
+export function getWorkspaceSettingsPath(workspaceRoot = process.cwd()) {
+  return path.join(path.resolve(workspaceRoot), ".creed", "settings.json");
+}
+
 function resolveSettingsPaths(workspaceRoot: string) {
-  const userSettingsPath = path.join(process.env.CREED_HOME ?? os.homedir(), ".creed", "settings.json");
+  const userSettingsPath = getUserSettingsPath();
   const workspaceSettingsPath = path.join(workspaceRoot, ".creed", "settings.json");
 
   return {
@@ -273,6 +298,10 @@ function resolveSettingsPaths(workspaceRoot: string) {
 }
 
 function applyEnvironmentOverrides(settings: ResolvedCliSettings) {
+  if (process.env.CREED_PROVIDER === "openai-compatible" || process.env.CREED_PROVIDER === "anthropic-compatible") {
+    settings.runtime.provider = process.env.CREED_PROVIDER;
+  }
+
   settings.runtime.model = process.env.CREED_MODEL ?? process.env.OPENAI_MODEL ?? settings.runtime.model;
   settings.runtime.baseUrl =
     process.env.CREED_BASE_URL ?? process.env.OPENAI_BASE_URL ?? settings.runtime.baseUrl;
@@ -309,6 +338,8 @@ function applyEnvironmentOverrides(settings: ResolvedCliSettings) {
 }
 
 function finalizeSettings(settings: ResolvedCliSettings) {
+  settings.runtime.provider =
+    settings.runtime.provider === "anthropic-compatible" ? "anthropic-compatible" : "openai-compatible";
   settings.runtime.model = settings.runtime.model.trim();
   settings.runtime.baseUrl = settings.runtime.baseUrl.trim();
   settings.runtime.apiKey = settings.runtime.apiKey.trim();
@@ -326,6 +357,7 @@ function getSettingsSnapshot(workspaceRoot = process.cwd()) {
   const envKey = JSON.stringify({
     CREED_MODEL: process.env.CREED_MODEL,
     OPENAI_MODEL: process.env.OPENAI_MODEL,
+    CREED_PROVIDER: process.env.CREED_PROVIDER,
     CREED_BASE_URL: process.env.CREED_BASE_URL,
     OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
     CREED_API_KEY: process.env.CREED_API_KEY,
@@ -375,6 +407,48 @@ export function getCliSettingsWarnings(workspaceRoot = process.cwd()) {
 
 export function getCliSettingsSources(workspaceRoot = process.cwd()) {
   return [...getSettingsSnapshot(workspaceRoot).sources];
+}
+
+export function clearCliSettingsCache(workspaceRoot?: string) {
+  if (!workspaceRoot) {
+    settingsCache.clear();
+    return;
+  }
+
+  settingsCache.delete(path.resolve(workspaceRoot));
+}
+
+function readExistingSettingsObject(filePath: string) {
+  if (!fs.existsSync(filePath)) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8")) as unknown;
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function saveUserRuntimeSettings(runtime: PersistedRuntimeSettings) {
+  const settingsPath = getUserSettingsPath();
+  const existingSettings = readExistingSettingsObject(settingsPath);
+  const existingRuntime = isRecord(existingSettings.runtime) ? existingSettings.runtime : {};
+  const nextSettings = {
+    ...existingSettings,
+    runtime: {
+      ...existingRuntime,
+      provider: runtime.provider,
+      baseUrl: runtime.baseUrl.trim(),
+      apiKey: runtime.apiKey.trim(),
+      model: runtime.model.trim(),
+    },
+  };
+
+  await fs.promises.mkdir(path.dirname(settingsPath), { recursive: true });
+  await fs.promises.writeFile(settingsPath, `${JSON.stringify(nextSettings, null, 2)}\n`, "utf-8");
+  clearCliSettingsCache();
 }
 
 export function getRuntimeSettingsStatus(workspaceRoot = process.cwd()): RuntimeSettingsStatus {

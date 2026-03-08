@@ -1,7 +1,7 @@
-import OpenAI from "openai";
 import fs from "fs/promises";
 import path from "path";
-import { getCliSettings } from "../config/settings";
+import { getCliSettings, type PersistedRuntimeSettings } from "../config/settings";
+import { createRuntimeTurn } from "../runtime/client";
 import { loadTools } from "../tools";
 import { executeTool } from "../tools/executor";
 
@@ -19,20 +19,19 @@ export class Orchestrator {
   private history: any[] = [];
   private tools: any[];
   private mode = "code" as const;
-  private openai: OpenAI;
   private ready: Promise<void>;
   private startupNotice: string | null = null;
-  private model: string;
+  private runtime: PersistedRuntimeSettings;
 
   constructor() {
     const settings = getCliSettings();
     this.tools = loadTools();
-    this.model = settings.runtime.model;
-
-    this.openai = new OpenAI({
-      baseURL: settings.runtime.baseUrl,
+    this.runtime = {
+      provider: settings.runtime.provider,
+      model: settings.runtime.model,
+      baseUrl: settings.runtime.baseUrl,
       apiKey: settings.runtime.apiKey,
-    });
+    };
 
     this.ready = this.initSystemPrompt();
   }
@@ -101,88 +100,13 @@ export class Orchestrator {
     while (!isFinished) {
       try {
         this.emit(onEvent, { type: "thinking", phase: "start" });
-
-        const requestOptions: any = {
-          model: this.model,
-          messages: this.history,
-          stream: true,
-        };
-
-        if (this.tools.length > 0) {
-          requestOptions.tools = this.tools.map((tool) => ({
-            type: "function",
-            function: tool,
-          }));
-        }
-
-        const stream = await this.openai.chat.completions.create(requestOptions as any) as any;
-
-        let fullContent = "";
-        let toolCalls: any[] = [];
-
-        if (typeof stream === "string") {
-          const lines = stream.split("\n");
-          for (const line of lines) {
-            if (line.startsWith("data: ") && !line.includes("[DONE]")) {
-              try {
-                const parsed = JSON.parse(line.slice(6));
-                const delta = parsed.choices?.[0]?.delta;
-                if (delta?.content) fullContent += delta.content;
-                if (delta?.tool_calls) {
-                  for (const tc of delta.tool_calls) {
-                    const index = tc.index;
-                    if (!toolCalls[index]) {
-                      toolCalls[index] = {
-                        id: "",
-                        type: "function",
-                        function: { name: "", arguments: "" },
-                      };
-                    }
-                    if (tc.id) toolCalls[index].id = tc.id;
-                    if (tc.type) toolCalls[index].type = tc.type;
-                    if (tc.function?.name) toolCalls[index].function.name = tc.function.name;
-                    if (tc.function?.arguments) {
-                      toolCalls[index].function.arguments += tc.function.arguments;
-                    }
-                  }
-                }
-              } catch {
-                // Ignore malformed streaming chunks from proxy.
-              }
-            }
-          }
-        } else {
-          for await (const chunk of stream) {
-            const delta = chunk.choices[0]?.delta;
-            if (!delta) continue;
-
-            if (delta.content) {
-              fullContent += delta.content;
-            }
-
-            if (delta.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const index = tc.index;
-                if (!toolCalls[index]) {
-                  toolCalls[index] = {
-                    id: "",
-                    type: "function",
-                    function: { name: "", arguments: "" },
-                  };
-                }
-                if (tc.id) toolCalls[index].id = tc.id;
-                if (tc.type) toolCalls[index].type = tc.type;
-                if (tc.function?.name) toolCalls[index].function.name = tc.function.name;
-                if (tc.function?.arguments) {
-                  toolCalls[index].function.arguments += tc.function.arguments;
-                }
-              }
-            }
-          }
-        }
+        const { content: fullContent, toolCalls } = await createRuntimeTurn(
+          this.runtime,
+          this.history,
+          this.tools,
+        );
 
         this.emit(onEvent, { type: "thinking", phase: "stop" });
-        toolCalls = toolCalls.filter(Boolean);
 
         const assistantMessage: any = {
           role: "assistant",
