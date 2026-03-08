@@ -38,6 +38,9 @@ const BOX = {
 
 let lastInputFrameHeight = 3;
 let hasRenderedInputEditor = false;
+let lastInputCursorLine = 1;
+const MAX_VISIBLE_INPUT_ROWS = 12;
+const PASTE_BURST_WINDOW_MS = 120;
 
 interface ResumePickerState {
   visible: boolean;
@@ -149,7 +152,7 @@ function getFrameWidth(): number {
 
 function getInputFrameWidth(): number {
   const terminalWidth = process.stdout.columns ?? 100;
-  return Math.max(72, terminalWidth - 1);
+  return Math.max(72, terminalWidth - 4);
 }
 
 function buildKeyValueLines(label: string, value: string, width: number): string[] {
@@ -353,6 +356,25 @@ function renderWelcome(branch: string, settings: ResolvedCliSettings) {
   console.log();
 }
 
+function chunkInputRows(input: string, width: number) {
+  const normalizedWidth = Math.max(1, width);
+  const logicalLines = input.split("\n");
+  const rows: string[] = [];
+
+  for (const logicalLine of logicalLines) {
+    if (logicalLine.length === 0) {
+      rows.push("");
+      continue;
+    }
+
+    for (let offset = 0; offset < logicalLine.length; offset += normalizedWidth) {
+      rows.push(logicalLine.slice(offset, offset + normalizedWidth));
+    }
+  }
+
+  return rows.length > 0 ? rows : [""];
+}
+
 function buildInputFrame(
   input: string,
   cursor: number,
@@ -381,15 +403,24 @@ function buildInputFrame(
     Math.max(1, inner - 1 - visibleLength(rightText)),
   );
   const prefix = `${pc.cyan("\u203a")} `;
-  const editableWidth = Math.max(10, inner - 1 - visibleLength(prefix));
-  let viewStart = Math.max(0, cursor - editableWidth + 1);
-
-  if (input.length - viewStart < editableWidth) {
-    viewStart = Math.max(0, input.length - editableWidth);
-  }
-
-  const visibleInput = input.slice(viewStart, viewStart + editableWidth);
-  const rowContent = padRightVisible(` ${prefix}${visibleInput}`, inner);
+  const prefixWidth = visibleLength(prefix);
+  const editableWidth = Math.max(10, inner - 1 - prefixWidth);
+  const safeCursor = Math.max(0, Math.min(cursor, input.length));
+  const wrappedInputRows = chunkInputRows(input, editableWidth);
+  const cursorRows = chunkInputRows(input.slice(0, safeCursor), editableWidth);
+  const cursorRowIndex = Math.max(0, cursorRows.length - 1);
+  const maxVisibleInputRows = Math.max(
+    3,
+    Math.min(MAX_VISIBLE_INPUT_ROWS, (process.stdout.rows ?? 24) - detailLines.length - 8),
+  );
+  const inputWindowStart = Math.max(0, cursorRowIndex - maxVisibleInputRows + 1);
+  const visibleInputRows = wrappedInputRows.slice(inputWindowStart, inputWindowStart + maxVisibleInputRows);
+  const continuationPrefix = " ".repeat(prefixWidth);
+  const inputRows = visibleInputRows.map((inputRow, index) => {
+    const rowPrefix = inputWindowStart + index === 0 ? prefix : continuationPrefix;
+    const rowContent = padRightVisible(` ${rowPrefix}${inputRow}`, inner);
+    return pc.gray(BOX.vertical) + pc.reset(rowContent) + pc.gray(BOX.vertical);
+  });
   const hintRows = detailLines.map((hintLine) =>
     pc.gray(BOX.vertical) +
     pc.reset(
@@ -403,16 +434,17 @@ function buildInputFrame(
     ) +
     pc.gray(BOX.vertical),
   );
-  const height = 3 + hintRows.length;
+  const height = 2 + inputRows.length + hintRows.length;
 
   return {
     top: pc.gray(
       `${BOX.topLeft}${BOX.horizontal}${filler}${rightText}${BOX.topRight}`,
     ),
-    row: pc.gray(BOX.vertical) + pc.reset(rowContent) + pc.gray(BOX.vertical),
+    inputRows,
     hintRows,
     bottom: pc.gray(`${BOX.bottomLeft}${BOX.horizontal.repeat(inner)}${BOX.bottomRight}`),
-    cursorColumn: 2 + visibleLength(prefix) + Math.max(0, cursor - viewStart),
+    cursorLine: 1 + (cursorRowIndex - inputWindowStart),
+    cursorColumn: 2 + prefixWidth + visibleLength(cursorRows.at(-1) ?? ""),
     height,
   };
 }
@@ -428,6 +460,7 @@ function renderInputEditor(
   options?: { fresh?: boolean; width?: number },
 ) {
   const width = options?.width ?? getInputFrameWidth();
+  const forceFresh = options?.fresh === true;
   const frame = buildInputFrame(
     input,
     cursor,
@@ -438,11 +471,15 @@ function renderInputEditor(
     statusLabel,
     width,
   );
-  const frameLines = [frame.top, frame.row, ...frame.hintRows, frame.bottom];
+  const frameLines = [frame.top, ...frame.inputRows, ...frame.hintRows, frame.bottom];
+
+  if (forceFresh && hasRenderedInputEditor) {
+    clearInputEditor();
+  }
 
   if (hasRenderedInputEditor && lastInputFrameHeight === frame.height) {
     readline.cursorTo(process.stdout, 0);
-    readline.moveCursor(process.stdout, 0, -1);
+    readline.moveCursor(process.stdout, 0, -lastInputCursorLine);
 
     for (let index = 0; index < frameLines.length; index += 1) {
       readline.cursorTo(process.stdout, 0);
@@ -461,9 +498,10 @@ function renderInputEditor(
     process.stdout.write(frameLines.join("\n"));
   }
 
-  readline.moveCursor(process.stdout, 0, -(frame.height - 2));
+  readline.moveCursor(process.stdout, 0, -((frame.height - 1) - frame.cursorLine));
   readline.cursorTo(process.stdout, frame.cursorColumn);
   lastInputFrameHeight = frame.height;
+  lastInputCursorLine = frame.cursorLine;
   hasRenderedInputEditor = true;
 }
 
@@ -473,9 +511,10 @@ function clearInputEditor() {
   }
 
   readline.cursorTo(process.stdout, 0);
-  readline.moveCursor(process.stdout, 0, -1);
+  readline.moveCursor(process.stdout, 0, -lastInputCursorLine);
   readline.clearScreenDown(process.stdout);
   hasRenderedInputEditor = false;
+  lastInputCursorLine = 1;
 }
 
 function moveBelowInputEditor() {
@@ -518,6 +557,7 @@ function startInteractiveRepl(options: StartReplOptions = {}) {
   let pendingCtrlCExit = false;
   let ctrlCExitTimer: ReturnType<typeof setTimeout> | undefined;
   let sessionClosed = false;
+  let pasteBurstUntil = 0;
   let resumePicker: ResumePickerState = {
     visible: false,
     sessions: [],
@@ -540,7 +580,20 @@ function startInteractiveRepl(options: StartReplOptions = {}) {
     currentInput = "";
     cursor = 0;
     slashSelection = -1;
+    pasteBurstUntil = 0;
   };
+
+  const insertInputText = (text: string) => {
+    const normalizedText = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    currentInput = currentInput.slice(0, cursor) + normalizedText + currentInput.slice(cursor);
+    cursor += normalizedText.length;
+  };
+
+  const armPasteBurst = () => {
+    pasteBurstUntil = Date.now() + PASTE_BURST_WINDOW_MS;
+  };
+
+  const isPasteBurstActive = () => Date.now() < pasteBurstUntil;
 
   const closeResumePicker = (clearInput = false) => {
     resumePicker = {
@@ -1179,6 +1232,13 @@ function startInteractiveRepl(options: StartReplOptions = {}) {
     }
 
     if (key.name === "return" || key.name === "enter") {
+      if (isPasteBurstActive()) {
+        insertInputText("\n");
+        armPasteBurst();
+        renderEditor();
+        return;
+      }
+
       await submitInput();
       return;
     }
@@ -1251,8 +1311,14 @@ function startInteractiveRepl(options: StartReplOptions = {}) {
     }
 
     if (str && !key.ctrl && !key.meta) {
-      currentInput = currentInput.slice(0, cursor) + str + currentInput.slice(cursor);
-      cursor += str.length;
+      if (str.length > 1 || str.includes("\n") || str.includes("\r")) {
+        insertInputText(str);
+        armPasteBurst();
+        renderEditor();
+        return;
+      }
+
+      insertInputText(str);
       renderEditor();
     }
   };

@@ -7,12 +7,65 @@ import {
   getCliSettingsSources,
   getCliSettingsWarnings,
   getRuntimeSettingsStatus,
+  getUserMcpPath,
   getUserSettingsPath,
+  removeUserMcpServer,
+  saveUserMcpServer,
+  type McpServerConfig,
 } from "./config/settings";
+import { clearMcpCache, getMcpServerStatuses, listMcpToolsForServer } from "./mcp";
 import { startRepl, type StartReplOptions } from "./repl";
 import { createCliOutputRenderer } from "./repl/output";
 import { createSessionId, saveSession } from "./repl/session-store";
 import { runSetupWizard } from "./setup/wizard";
+
+function collectOptionValue(value: string, previous: string[]) {
+  previous.push(value);
+  return previous;
+}
+
+function validateMcpServerName(name: string) {
+  return /^[a-zA-Z0-9_-]+$/.test(name);
+}
+
+function parseMcpEnvEntries(entries: string[]) {
+  const env: Record<string, string> = {};
+
+  for (const entry of entries) {
+    const separatorIndex = entry.indexOf("=");
+    if (separatorIndex <= 0) {
+      throw new Error(`Invalid env entry "${entry}". Use KEY=VALUE.`);
+    }
+
+    const key = entry.slice(0, separatorIndex).trim();
+    const value = entry.slice(separatorIndex + 1);
+
+    if (!key) {
+      throw new Error(`Invalid env entry "${entry}". Use KEY=VALUE.`);
+    }
+
+    env[key] = value;
+  }
+
+  return env;
+}
+
+function validateMcpLaunchInput(name: string, command: string, args: string[]) {
+  const normalizedCommand = command.trim().toLowerCase();
+  if (!["npx", "npx.cmd"].includes(normalizedCommand)) {
+    return;
+  }
+
+  const hasPackageOrCommand = args.some((arg) => !arg.trim().startsWith("-"));
+  if (hasPackageOrCommand) {
+    return;
+  }
+
+  throw new Error(
+    `The MCP server "${name}" is missing the package or command argument for npx. ` +
+    `Example: creed-cli mcp add ${name} npx -y @modelcontextprotocol/server-github`
+  );
+}
 
 function exitWithMissingRuntimeConfig() {
   const runtimeStatus = getRuntimeSettingsStatus();
@@ -139,6 +192,7 @@ async function runExecPrompt(prompt: string) {
     await saveSession(sessionId, history);
   } finally {
     output.dispose();
+    await clearMcpCache();
   }
 }
 
@@ -176,43 +230,98 @@ async function runLogoutCommand() {
   console.log(pc.gray("Workspace-level .creed/settings.json values, if any, can still override runtime config."));
 }
 
-function printPlaceholderCommand(command: string, detail: string) {
-  console.error(pc.yellow(`${command} is not implemented yet.`));
-  console.error(pc.gray(detail));
-  process.exitCode = 1;
+async function runMcpListCommand() {
+  try {
+    const statuses = await getMcpServerStatuses();
+    if (statuses.length === 0) {
+      console.log(pc.yellow("No MCP servers configured yet."));
+      console.log(pc.gray("Use `creed-cli mcp add <name> <command> [args...]` to register one."));
+      return;
+    }
+
+    console.log(pc.cyan("Configured MCP servers"));
+    console.log();
+
+    for (const status of statuses) {
+      const stateLabel = !status.enabled
+        ? pc.gray("disabled")
+        : status.connected
+          ? pc.green(`connected (${status.toolCount} tool${status.toolCount === 1 ? "" : "s"})`)
+          : pc.red("error");
+
+      console.log(`${pc.white(status.name)} ${pc.gray("-")} ${stateLabel}`);
+      console.log(pc.gray(`  command: ${[status.command, ...status.args].join(" ")}`));
+      if (status.cwd) {
+        console.log(pc.gray(`  cwd: ${status.cwd}`));
+      }
+      if (status.error) {
+        console.log(pc.red(`  error: ${status.error}`));
+      }
+    }
+  } finally {
+    await clearMcpCache();
+  }
 }
 
-function runFeaturesCommand() {
-  const settings = getCliSettings();
+async function runMcpAddCommand(
+  name: string,
+  command: string,
+  args: string[],
+  options: { env: string[]; cwd?: string; disable?: boolean },
+) {
+  if (!validateMcpServerName(name)) {
+    throw new Error("MCP server name may only contain letters, numbers, hyphens, and underscores.");
+  }
 
-  console.log(pc.cyan("CREED CLI features"));
-  console.log();
-  console.log(`${pc.green("interactive")} chat, resume picker, fork flow, model picker`);
-  console.log(`${pc.green("non-interactive")} exec and review commands`);
-  console.log(`${pc.green("runtime")} ${settings.runtime.provider} provider, model switching, setup wizard`);
-  console.log(`${pc.green("storage")} user-level sessions.sqlite and JSON settings`);
-  console.log(`${pc.green("tools")} file tools, web_search, optional unsafe shell gate`);
-  console.log();
-  console.log(pc.gray("Planned / placeholder surfaces: mcp, app-server, cloud, apply, completion."));
+  validateMcpLaunchInput(name, command, args);
+
+  const serverConfig: McpServerConfig = {
+    command,
+    args,
+    env: parseMcpEnvEntries(options.env),
+    cwd: options.cwd?.trim() || undefined,
+    enabled: !options.disable,
+  };
+
+  await saveUserMcpServer(name, serverConfig);
+  await clearMcpCache();
+  console.log(pc.green(`Saved MCP server "${name}".`));
+  console.log(pc.gray(`Command: ${[command, ...args].join(" ")}`));
+  console.log(pc.gray(`Config file: ${getUserMcpPath()}`));
 }
 
-function runDebugCommand() {
-  const settings = getCliSettings();
-  const sources = getCliSettingsSources();
-  const runtimeStatus = getRuntimeSettingsStatus();
+async function runMcpRemoveCommand(name: string) {
+  const removed = await removeUserMcpServer(name);
+  await clearMcpCache();
 
-  console.log(pc.cyan("CREED CLI debug"));
-  console.log();
-  console.log(`workspace: ${process.cwd()}`);
-  console.log(`user settings: ${getUserSettingsPath()}`);
-  console.log(`settings sources: ${sources.length > 0 ? sources.join(", ") : "none"}`);
-  console.log(`runtime configured: ${runtimeStatus.isConfigured ? "yes" : "no"}`);
-  console.log(`runtime provider: ${settings.runtime.provider || "unset"}`);
-  console.log(`runtime model: ${settings.runtime.model || "unset"}`);
-  console.log(`shell tool enabled: ${settings.shell.enableUnsafeCommands ? "yes" : "no"}`);
+  if (!removed) {
+    console.log(pc.yellow(`No MCP server named "${name}" was found.`));
+    return;
+  }
 
-  if (!runtimeStatus.isConfigured) {
-    console.log(`missing runtime fields: ${runtimeStatus.missing.join(", ")}`);
+  console.log(pc.green(`Removed MCP server "${name}".`));
+}
+
+async function runMcpToolsCommand(serverName?: string) {
+  try {
+    const tools = await listMcpToolsForServer(serverName);
+    if (tools.length === 0) {
+      console.log(pc.yellow(serverName ? `No tools found for MCP server "${serverName}".` : "No MCP tools available."));
+      return;
+    }
+
+    console.log(pc.cyan(serverName ? `MCP tools for ${serverName}` : "Discovered MCP tools"));
+    console.log();
+
+    for (const tool of tools) {
+      console.log(`${pc.white(tool.qualifiedName)} ${pc.gray(`(${tool.actualToolName})`)}`);
+      console.log(pc.gray(`  server: ${tool.serverName}`));
+      if (tool.description) {
+        console.log(pc.gray(`  description: ${tool.description}`));
+      }
+    }
+  } finally {
+    await clearMcpCache();
   }
 }
 
@@ -244,31 +353,6 @@ program
   });
 
 program
-  .command("exec")
-  .alias("e")
-  .description("Run Creed non-interactively")
-  .argument("[prompt...]", "Prompt to run")
-  .action(async (promptParts?: string[]) => {
-    const prompt = await resolvePromptInput(promptParts);
-    if (!prompt) {
-      console.error(pc.red("No prompt provided."));
-      console.error(pc.gray("Pass a prompt as arguments or pipe it on stdin."));
-      process.exitCode = 1;
-      return;
-    }
-
-    await runExecPrompt(prompt);
-  });
-
-program
-  .command("review")
-  .description("Run a code review non-interactively")
-  .argument("[target...]", "Optional file, directory, or review target")
-  .action(async (targetParts?: string[]) => {
-    await runExecPrompt(buildReviewPrompt(targetParts));
-  });
-
-program
   .command("login")
   .description("Manage login")
   .action(async () => {
@@ -282,90 +366,72 @@ program
     await runLogoutCommand();
   });
 
-program
+const mcpCommand = program
   .command("mcp")
-  .description("Manage external MCP servers for Creed")
-  .action(() => {
-    printPlaceholderCommand("mcp", "MCP management commands are not wired yet in this CLI.");
+  .description("Manage external MCP servers for Creed");
+
+mcpCommand
+  .command("list")
+  .description("List configured MCP servers and connection status")
+  .action(async () => {
+    await runMcpListCommand();
   });
 
-program
-  .command("mcp-server")
-  .description("Start Creed as an MCP server (stdio)")
-  .action(() => {
-    printPlaceholderCommand("mcp-server", "Running Creed as an MCP server is not implemented yet.");
+mcpCommand
+  .command("add")
+  .description("Add an MCP server that Creed can discover tools from")
+  .argument("<name>", "Logical name for the server")
+  .argument("<command>", "Executable used to start the MCP server")
+  .argument("[args...]", "Arguments passed to the executable")
+  .allowUnknownOption(true)
+  .option("--cwd <dir>", "Working directory for the server process")
+  .option(
+    "--env <key=value>",
+    "Environment variable for the server process (repeatable)",
+    collectOptionValue,
+    [],
+  )
+  .option("--disable", "Add the server in disabled mode")
+  .action(
+    async (
+      name: string,
+      command: string,
+      args: string[],
+      options: { env: string[]; cwd?: string; disable?: boolean },
+    ) => {
+      try {
+        await runMcpAddCommand(name, command, args ?? [], options);
+      } catch (error) {
+        console.error(pc.red(error instanceof Error ? error.message : String(error)));
+        process.exitCode = 1;
+      }
+    },
+  );
+
+mcpCommand
+  .command("remove")
+  .description("Remove a configured MCP server")
+  .argument("<name>", "Logical server name")
+  .action(async (name: string) => {
+    await runMcpRemoveCommand(name);
   });
 
-program
-  .command("app-server")
-  .description("[experimental] Run the app server or related tooling")
-  .action(() => {
-    printPlaceholderCommand("app-server", "The app-server surface is reserved but not implemented yet.");
+mcpCommand
+  .command("tools")
+  .description("List tools discovered from configured MCP servers")
+  .argument("[name]", "Optional MCP server name")
+  .action(async (name?: string) => {
+    try {
+      await runMcpToolsCommand(name);
+    } catch (error) {
+      console.error(pc.red(error instanceof Error ? error.message : String(error)));
+      process.exitCode = 1;
+    }
   });
 
-program
-  .command("completion")
-  .description("Generate shell completion scripts")
-  .action(() => {
-    printPlaceholderCommand("completion", "Shell completion generation is not implemented yet.");
-  });
-
-program
-  .command("sandbox")
-  .description("Inspect sandbox and execution safety defaults")
-  .action(() => {
-    const settings = getCliSettings();
-    console.log(pc.cyan("CREED sandbox status"));
-    console.log();
-    console.log(`workspace root: ${process.cwd()}`);
-    console.log(`unsafe shell tool enabled: ${settings.shell.enableUnsafeCommands ? "yes" : "no"}`);
-    console.log("file tools: workspace-scoped");
-    console.log("approval flow: not implemented as a separate command yet");
-  });
-
-program
-  .command("debug")
-  .description("Debugging tools")
-  .action(() => {
-    runDebugCommand();
-  });
-
-program
-  .command("apply")
-  .alias("a")
-  .description("Apply the latest generated diff to the working tree")
-  .action(() => {
-    printPlaceholderCommand("apply", "Diff artifact apply is not implemented yet in CREED CLI.");
-  });
-
-program
-  .command("resume")
-  .description("Resume a previous interactive session")
-  .option("--last", "Continue the most recent saved session")
-  .action(async (options: { last?: boolean }) => {
-    await launchInteractive(options.last ? { resumeLatest: true } : { openResumePicker: true });
-  });
-
-program
-  .command("fork")
-  .description("Fork a previous interactive session")
-  .option("--last", "Fork the most recent saved session")
-  .action(async (options: { last?: boolean }) => {
-    await launchInteractive(options.last ? { forkLatest: true } : { openForkPicker: true });
-  });
-
-program
-  .command("cloud")
-  .description("[experimental] Browse tasks from Creed Cloud and apply changes locally")
-  .action(() => {
-    printPlaceholderCommand("cloud", "Cloud task browsing is not implemented yet.");
-  });
-
-program
-  .command("features")
-  .description("Inspect feature flags")
-  .action(() => {
-    runFeaturesCommand();
-  });
+mcpCommand.action(async () => {
+  await runMcpListCommand();
+});
 
 void program.parseAsync();
+

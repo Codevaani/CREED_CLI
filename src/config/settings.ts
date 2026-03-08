@@ -4,6 +4,14 @@ import path from "path";
 
 export type RuntimeProvider = "openai-compatible" | "anthropic-compatible";
 
+export interface McpServerConfig {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  cwd?: string;
+  enabled: boolean;
+}
+
 export interface CliSettingsInput {
   runtime?: {
     provider?: RuntimeProvider;
@@ -22,6 +30,9 @@ export interface CliSettingsInput {
     showShellStatusLine?: boolean;
     animateNonInteractiveThinking?: boolean;
     ctrlCConfirmTimeoutMs?: number;
+  };
+  mcp?: {
+    servers?: Record<string, Partial<McpServerConfig> | undefined>;
   };
 }
 
@@ -44,6 +55,9 @@ export interface ResolvedCliSettings {
     animateNonInteractiveThinking: boolean;
     ctrlCConfirmTimeoutMs: number;
   };
+  mcp: {
+    servers: Record<string, McpServerConfig>;
+  };
 }
 
 export type RequiredRuntimeSetting = keyof ResolvedCliSettings["runtime"];
@@ -58,6 +72,20 @@ export interface PersistedRuntimeSettings {
   model: string;
   baseUrl: string;
   apiKey: string;
+}
+
+function normalizeWindowsExecutable(command: string) {
+  const trimmed = command.trim();
+  if (process.platform !== "win32") {
+    return trimmed;
+  }
+
+  const lower = trimmed.toLowerCase();
+  if (["npx", "npm", "pnpm", "yarn", "bunx"].includes(lower)) {
+    return `${trimmed}.cmd`;
+  }
+
+  return trimmed;
 }
 
 interface CachedSettingsSnapshot {
@@ -86,6 +114,9 @@ const DEFAULT_SETTINGS: ResolvedCliSettings = {
     animateNonInteractiveThinking: true,
     ctrlCConfirmTimeoutMs: 2000,
   },
+  mcp: {
+    servers: {},
+  },
 };
 
 const settingsCache = new Map<string, CachedSettingsSnapshot>();
@@ -100,6 +131,35 @@ function cloneDefaultSettings(): ResolvedCliSettings {
     shell: { ...DEFAULT_SETTINGS.shell },
     webSearch: { ...DEFAULT_SETTINGS.webSearch },
     ui: { ...DEFAULT_SETTINGS.ui },
+    mcp: {
+      servers: {},
+    },
+  };
+}
+
+function normalizeMcpServerConfig(value: unknown): McpServerConfig | undefined {
+  if (!isRecord(value) || typeof value.command !== "string") {
+    return undefined;
+  }
+
+  const args = Array.isArray(value.args)
+    ? value.args.filter((entry): entry is string => typeof entry === "string")
+    : [];
+
+  const env = isRecord(value.env)
+    ? Object.fromEntries(
+        Object.entries(value.env).filter(
+          (entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string",
+        ),
+      )
+    : {};
+
+  return {
+    command: normalizeWindowsExecutable(value.command),
+    args,
+    env,
+    cwd: typeof value.cwd === "string" ? value.cwd : undefined,
+    enabled: typeof value.enabled === "boolean" ? value.enabled : true,
   };
 }
 
@@ -150,6 +210,20 @@ function mergeSettings(base: ResolvedCliSettings, override?: CliSettingsInput) {
     base.ui = {
       ...base.ui,
       ...override.ui,
+    };
+  }
+
+  if (override.mcp?.servers) {
+    base.mcp = {
+      servers: {
+        ...base.mcp.servers,
+        ...Object.fromEntries(
+          Object.entries(override.mcp.servers).flatMap(([name, serverConfig]) => {
+            const normalizedServer = normalizeMcpServerConfig(serverConfig);
+            return normalizedServer ? [[name, normalizedServer]] : [];
+          }),
+        ),
+      },
     };
   }
 
@@ -254,6 +328,21 @@ function normalizeSettingsShape(raw: Record<string, unknown>): CliSettingsInput 
     };
   }
 
+  if (isRecord(raw.mcp)) {
+    const servers = isRecord(raw.mcp.servers)
+      ? Object.fromEntries(
+          Object.entries(raw.mcp.servers).flatMap(([name, value]) => {
+            const normalizedServer = normalizeMcpServerConfig(value);
+            return normalizedServer ? [[name, normalizedServer]] : [];
+          }),
+        )
+      : undefined;
+
+    normalized.mcp = {
+      servers,
+    };
+  }
+
   return normalized;
 }
 
@@ -279,8 +368,60 @@ function readSettingsFile(filePath: string, warnings: string[]) {
   }
 }
 
+function normalizeMcpSettingsShape(raw: Record<string, unknown>): CliSettingsInput | undefined {
+  const container = isRecord(raw.mcp) ? raw.mcp : raw;
+  if (!isRecord(container) || !isRecord(container.servers)) {
+    return undefined;
+  }
+
+  const servers = Object.fromEntries(
+    Object.entries(container.servers).flatMap(([name, value]) => {
+      const normalizedServer = normalizeMcpServerConfig(value);
+      return normalizedServer ? [[name, normalizedServer]] : [];
+    }),
+  );
+
+  return {
+    mcp: {
+      servers,
+    },
+  };
+}
+
+function readMcpFile(filePath: string, warnings: string[]) {
+  if (!fs.existsSync(filePath)) {
+    return undefined;
+  }
+
+  try {
+    const rawContent = fs.readFileSync(filePath, "utf-8");
+    const parsedContent = JSON.parse(rawContent) as unknown;
+
+    if (!isRecord(parsedContent)) {
+      warnings.push(`Ignoring ${filePath} because it does not contain a JSON object.`);
+      return undefined;
+    }
+
+    const normalized = normalizeMcpSettingsShape(parsedContent);
+    if (!normalized) {
+      warnings.push(`Ignoring ${filePath} because it does not contain an MCP server map.`);
+      return undefined;
+    }
+
+    return normalized;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    warnings.push(`Ignoring invalid MCP file ${filePath}: ${message}`);
+    return undefined;
+  }
+}
+
 export function getUserSettingsPath() {
   return path.join(os.homedir(), ".creed", "settings.json");
+}
+
+export function getUserMcpPath() {
+  return path.join(os.homedir(), ".creed", "mcp.json");
 }
 
 export function getWorkspaceSettingsPath(workspaceRoot = process.cwd()) {
@@ -289,10 +430,12 @@ export function getWorkspaceSettingsPath(workspaceRoot = process.cwd()) {
 
 function resolveSettingsPaths(workspaceRoot: string) {
   const userSettingsPath = getUserSettingsPath();
+  const userMcpPath = getUserMcpPath();
   const workspaceSettingsPath = path.join(workspaceRoot, ".creed", "settings.json");
 
   return {
     userSettingsPath,
+    userMcpPath,
     workspaceSettingsPath,
   };
 }
@@ -348,8 +491,42 @@ function finalizeSettings(settings: ResolvedCliSettings) {
     500,
     Math.min(10_000, Math.floor(settings.ui.ctrlCConfirmTimeoutMs)),
   );
+  settings.mcp.servers = Object.fromEntries(
+    Object.entries(settings.mcp.servers).flatMap(([name, serverConfig]) => {
+      const normalizedName = name.trim();
+      const normalizedCommand = normalizeWindowsExecutable(serverConfig.command);
+
+      if (!normalizedName || !normalizedCommand) {
+        return [];
+      }
+
+      return [[
+        normalizedName,
+        {
+          command: normalizedCommand,
+          args: serverConfig.args.map((arg) => arg.trim()).filter(Boolean),
+          env: Object.fromEntries(
+            Object.entries(serverConfig.env).map(([key, value]) => [key.trim(), value]),
+          ),
+          cwd: serverConfig.cwd?.trim() || undefined,
+          enabled: serverConfig.enabled !== false,
+        },
+      ]];
+    }),
+  );
 
   return settings;
+}
+
+function withoutMcpSettings(input?: CliSettingsInput) {
+  if (!input?.mcp) {
+    return input;
+  }
+
+  const nextSettings: CliSettingsInput = { ...input };
+  delete nextSettings.mcp;
+
+  return Object.keys(nextSettings).length === 0 ? undefined : nextSettings;
 }
 
 function getSettingsSnapshot(workspaceRoot = process.cwd()) {
@@ -377,12 +554,17 @@ function getSettingsSnapshot(workspaceRoot = process.cwd()) {
 
   const warnings: string[] = [];
   const settings = cloneDefaultSettings();
-  const { userSettingsPath, workspaceSettingsPath } = resolveSettingsPaths(normalizedWorkspaceRoot);
-  const userSettings = readSettingsFile(userSettingsPath, warnings);
+  const { userSettingsPath, userMcpPath, workspaceSettingsPath } = resolveSettingsPaths(normalizedWorkspaceRoot);
+  const hasUserMcpFile = fs.existsSync(userMcpPath);
+  const userSettings = hasUserMcpFile
+    ? withoutMcpSettings(readSettingsFile(userSettingsPath, warnings))
+    : readSettingsFile(userSettingsPath, warnings);
+  const userMcpSettings = readMcpFile(userMcpPath, warnings);
   const workspaceSettings = readSettingsFile(workspaceSettingsPath, warnings);
-  const sources = [userSettingsPath, workspaceSettingsPath].filter((filePath) => fs.existsSync(filePath));
+  const sources = [userSettingsPath, userMcpPath, workspaceSettingsPath].filter((filePath) => fs.existsSync(filePath));
 
   mergeSettings(settings, userSettings);
+  mergeSettings(settings, userMcpSettings);
   mergeSettings(settings, workspaceSettings);
   applyEnvironmentOverrides(settings);
 
@@ -431,6 +613,42 @@ function readExistingSettingsObject(filePath: string) {
   }
 }
 
+function readExistingMcpFileObject(filePath: string, legacySettingsPath?: string) {
+  const existingMcpFile = readExistingSettingsObject(filePath);
+  if (Object.keys(existingMcpFile).length > 0) {
+    return isRecord(existingMcpFile.mcp) ? { ...existingMcpFile.mcp } : existingMcpFile;
+  }
+
+  if (!legacySettingsPath) {
+    return {};
+  }
+
+  const existingSettings = readExistingSettingsObject(legacySettingsPath);
+  return isRecord(existingSettings.mcp) ? { ...existingSettings.mcp } : {};
+}
+
+async function stripUserMcpFromSettings() {
+  const settingsPath = getUserSettingsPath();
+  if (!fs.existsSync(settingsPath)) {
+    return;
+  }
+
+  const existingSettings = readExistingSettingsObject(settingsPath);
+  if (!isRecord(existingSettings.mcp)) {
+    return;
+  }
+
+  const nextSettings = { ...existingSettings } as Record<string, unknown>;
+  delete nextSettings.mcp;
+
+  if (Object.keys(nextSettings).length === 0) {
+    await fs.promises.rm(settingsPath, { force: true });
+    return;
+  }
+
+  await fs.promises.writeFile(settingsPath, `${JSON.stringify(nextSettings, null, 2)}\n`, "utf-8");
+}
+
 export async function saveUserRuntimeSettings(runtime: PersistedRuntimeSettings) {
   const settingsPath = getUserSettingsPath();
   const existingSettings = readExistingSettingsObject(settingsPath);
@@ -469,6 +687,56 @@ export async function clearUserRuntimeSettings() {
   }
 
   clearCliSettingsCache();
+}
+
+export async function saveUserMcpServer(name: string, server: McpServerConfig) {
+  const settingsPath = getUserSettingsPath();
+  const mcpPath = getUserMcpPath();
+  const existingMcp = readExistingMcpFileObject(mcpPath, settingsPath);
+  const existingServers = isRecord(existingMcp.servers) ? existingMcp.servers : {};
+  const normalizedServer = normalizeMcpServerConfig(server);
+
+  if (!normalizedServer) {
+    throw new Error("Invalid MCP server configuration.");
+  }
+
+  const nextMcp = {
+    ...existingMcp,
+    servers: {
+      ...existingServers,
+      [name]: normalizedServer,
+    },
+  };
+
+  await fs.promises.mkdir(path.dirname(mcpPath), { recursive: true });
+  await fs.promises.writeFile(mcpPath, `${JSON.stringify(nextMcp, null, 2)}\n`, "utf-8");
+  await stripUserMcpFromSettings();
+  clearCliSettingsCache();
+}
+
+export async function removeUserMcpServer(name: string) {
+  const settingsPath = getUserSettingsPath();
+  const mcpPath = getUserMcpPath();
+  const existingMcp = readExistingMcpFileObject(mcpPath, settingsPath);
+  const existingServers = isRecord(existingMcp.servers) ? { ...existingMcp.servers } : {};
+
+  if (!(name in existingServers)) {
+    clearCliSettingsCache();
+    return false;
+  }
+
+  delete existingServers[name];
+
+  const nextMcp = {
+    ...existingMcp,
+    servers: existingServers,
+  };
+
+  await fs.promises.mkdir(path.dirname(mcpPath), { recursive: true });
+  await fs.promises.writeFile(mcpPath, `${JSON.stringify(nextMcp, null, 2)}\n`, "utf-8");
+  await stripUserMcpFromSettings();
+  clearCliSettingsCache();
+  return true;
 }
 
 export function getRuntimeSettingsStatus(workspaceRoot = process.cwd()): RuntimeSettingsStatus {

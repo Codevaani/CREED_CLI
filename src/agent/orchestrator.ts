@@ -25,7 +25,7 @@ export class Orchestrator {
 
   constructor() {
     const settings = getCliSettings();
-    this.tools = loadTools();
+    this.tools = [];
     this.runtime = {
       provider: settings.runtime.provider,
       model: settings.runtime.model,
@@ -33,7 +33,12 @@ export class Orchestrator {
       apiKey: settings.runtime.apiKey,
     };
 
-    this.ready = this.initSystemPrompt();
+    this.ready = this.initialize();
+  }
+
+  private async initialize() {
+    this.tools = await loadTools();
+    await this.initSystemPrompt();
   }
 
   public getMode() {

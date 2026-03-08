@@ -3,6 +3,7 @@ import path from "path";
 import { exec } from "child_process";
 import util from "util";
 import { getCliSettings } from "../config/settings";
+import { executeMcpTool } from "../mcp";
 
 const execAsync = util.promisify(exec);
 const EXISTING_CODE_MARKERS = [
@@ -376,6 +377,12 @@ export async function executeTool(name: string, args: any): Promise<string> {
       }
 
       default:
+        {
+          const mcpResult = await executeMcpTool(name, args, workspaceRoot);
+          if (mcpResult !== null) {
+            return mcpResult;
+          }
+        }
         return `Tool '${name}' is not yet implemented in the local executor.`;
     }
   } catch (error: any) {

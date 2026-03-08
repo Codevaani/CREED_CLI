@@ -1,5 +1,6 @@
 import toolsData from "./tools.json";
 import { getCliSettings } from "../config/settings";
+import { loadMcpTools } from "../mcp";
 
 const CORE_TOOL_NAMES = new Set([
   "read_file",
@@ -10,7 +11,7 @@ const CORE_TOOL_NAMES = new Set([
   "web_search",
 ]);
 
-export function loadTools() {
+export async function loadTools() {
   const settings = getCliSettings();
   const enabledToolNames = new Set(CORE_TOOL_NAMES);
 
@@ -18,5 +19,8 @@ export function loadTools() {
     enabledToolNames.add("run_terminal_cmd");
   }
 
-  return toolsData.filter((tool) => enabledToolNames.has(tool.name));
+  const localTools = toolsData.filter((tool) => enabledToolNames.has(tool.name));
+  const mcpTools = await loadMcpTools();
+
+  return [...localTools, ...mcpTools];
 }

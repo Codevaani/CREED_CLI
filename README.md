@@ -72,10 +72,16 @@ When you start chat without runtime config, CREED CLI opens an interactive setup
 3. test the connection with a simple request
 4. save the working configuration
 
-Saved user settings go to:
+Saved user runtime settings go to:
 
 ```text
 %USERPROFILE%\.creed\settings.json
+```
+
+Saved MCP server entries go to:
+
+```text
+%USERPROFILE%\.creed\mcp.json
 ```
 
 If the app is started in a non-interactive context and config is missing, it exits early with a clear runtime configuration error instead of trying to open the wizard.
@@ -85,14 +91,16 @@ If the app is started in a non-interactive context and config is missing, it exi
 Settings can be read from:
 
 - workspace: `.creed/settings.json`
-- user: `%USERPROFILE%\.creed\settings.json`
+- user runtime settings: `%USERPROFILE%\.creed\settings.json`
+- user MCP servers: `%USERPROFILE%\.creed\mcp.json`
 
 Priority order:
 
 1. default values
-2. user settings
-3. workspace settings
-4. environment variables
+2. user runtime settings
+3. user MCP settings
+4. workspace settings
+5. environment variables
 
 Required runtime fields before chat can start:
 
@@ -123,6 +131,21 @@ Example:
     "showShellStatusLine": true,
     "animateNonInteractiveThinking": true,
     "ctrlCConfirmTimeoutMs": 2000
+  }
+}
+```
+
+User-level MCP servers live in a separate file:
+
+```json
+{
+  "servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "env": {},
+      "enabled": true
+    }
   }
 }
 ```
@@ -160,22 +183,20 @@ The input UI also supports:
 CREED CLI now exposes a larger command surface from the root binary:
 
 - `chat` starts the interactive coding REPL
-- `exec` runs one prompt non-interactively
-- `review` runs a non-interactive review prompt against the workspace
 - `login` opens the runtime setup flow
 - `logout` removes saved user runtime credentials
-- `resume` opens or restores saved conversations
-- `fork` starts a new branch of a saved conversation
-- `sandbox`, `debug`, and `features` expose runtime inspection helpers
+- `mcp` lets you add, list, remove, and inspect external MCP servers
 
-Reserved command names also exist for future surfaces:
+MCP entries saved by the CLI are written to `%USERPROFILE%\.creed\mcp.json`.
 
-- `mcp`
-- `mcp-server`
-- `app-server`
-- `completion`
-- `apply`
-- `cloud`
+Useful MCP commands:
+
+```bash
+bun run index.ts mcp list
+bun run index.ts mcp add github npx -y @modelcontextprotocol/server-github
+bun run index.ts mcp tools github
+bun run index.ts mcp remove github
+```
 
 ## Sessions And Resume
 
