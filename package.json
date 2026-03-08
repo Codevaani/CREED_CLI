@@ -1,0 +1,21 @@
+{
+  "name": "creed-cli",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun run index.ts chat",
+    "chat": "bun run index.ts chat"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "commander": "^14.0.3",
+    "openai": "^6.27.0",
+    "picocolors": "^1.1.1"
+  }
+}
