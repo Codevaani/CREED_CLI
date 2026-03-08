@@ -25,6 +25,10 @@ Settings can be configured at:
 
 Workspace settings override user settings, and environment variables override both.
 
+Chat sessions are stored at:
+
+- user: `%USERPROFILE%\\.creed\\sessions.sqlite`
+
 The CLI now requires these runtime values before `chat` starts:
 
 - `runtime.baseUrl`

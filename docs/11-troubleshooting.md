@@ -73,6 +73,16 @@ Try:
 
 That is usually expected. Shell execution is disabled by default.
 
+## Session database location
+
+Current active store:
+
+```text
+%USERPROFILE%\.creed\sessions.sqlite
+```
+
+If old workspace `.creed` session files exist, the CLI migrates them into the user-level database.
+
 ## TypeScript compile fails after local changes
 
 Run:

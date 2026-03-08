@@ -109,7 +109,7 @@ Settings:
 
 Sessions:
 
-- `.creed/sessions.sqlite`
+- `%USERPROFILE%\.creed\sessions.sqlite`
 
 ## High-level request flow
 

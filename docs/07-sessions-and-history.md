@@ -25,7 +25,7 @@ Session history is stored in SQLite.
 Database path:
 
 ```text
-.creed/sessions.sqlite
+%USERPROFILE%\.creed\sessions.sqlite
 ```
 
 ## Why SQLite was introduced
@@ -45,8 +45,10 @@ Older session files from the previous JSON-based storage are migrated automatica
 
 Legacy paths:
 
-- `.creed/sessions/latest.json`
-- `.creed/sessions/entries/*.json`
+- `%USERPROFILE%\.creed\sessions\latest.json`
+- `%USERPROFILE%\.creed\sessions\entries\*.json`
+- workspace `.creed/sessions.sqlite`
+- workspace `.creed/sessions/entries/*.json`
 
 ## `/resume` behavior
 
