@@ -1,7 +1,7 @@
 export interface SlashCommandDefinition {
   name: string;
   description: string;
-  action: "help" | "clear" | "exit" | "resume";
+  action: "help" | "clear" | "exit" | "resume" | "model";
 }
 
 export interface SlashCommandState {
@@ -16,6 +16,7 @@ export interface SlashCommandExecutionContext {
   clearScreen: () => void;
   exitSession: () => void;
   resumeSession: () => Promise<void>;
+  selectModel: (input: string) => Promise<void>;
 }
 
 export type SlashCommandExecutionResult = "handled" | "unknown" | "not-command";
@@ -24,6 +25,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { name: "/help", description: "show available commands", action: "help" },
   { name: "/clear", description: "clear the screen", action: "clear" },
   { name: "/resume", description: "pick a saved conversation to resume", action: "resume" },
+  { name: "/model", description: "pick or switch the active model", action: "model" },
   { name: "/exit", description: "close the session", action: "exit" },
   { name: "/quit", description: "close the session", action: "exit" },
 ];
@@ -119,6 +121,9 @@ export async function executeSlashCommand(
       break;
     case "resume":
       await context.resumeSession();
+      break;
+    case "model":
+      await context.selectModel(trimmedInput);
       break;
     case "exit":
       context.exitSession();

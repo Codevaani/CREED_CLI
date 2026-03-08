@@ -3,6 +3,10 @@
   "module": "src/index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "dev": "bun run index.ts chat",
+    "chat": "bun run index.ts chat"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },

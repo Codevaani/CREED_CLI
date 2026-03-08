@@ -12,6 +12,12 @@ To run:
 bun run index.ts chat
 ```
 
+For direct interactive launch during development:
+
+```bash
+bun run dev
+```
+
 Settings can be configured at:
 
 - workspace: `.creed/settings.json`

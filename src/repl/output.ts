@@ -1,6 +1,7 @@
 import pc from "picocolors";
 import type { OrchestratorEvent } from "../agent/orchestrator";
 import type { SlashCommandDefinition } from "./commands";
+import type { RuntimeModelOption } from "../runtime/client";
 
 const ANSI_PATTERN = /\u001b\[[0-9;]*m/g;
 const ASSISTANT_BULLET = pc.green("\u2022");
@@ -543,6 +544,16 @@ export function createCliOutputRenderer(options?: { animateThinking?: boolean })
       console.log();
       for (const command of commands) {
         console.log(`${LIST_BULLET} ${pc.cyan(command.name)} ${pc.gray("-")} ${command.description}`);
+      }
+      console.log();
+    },
+
+    renderModelList(models: readonly RuntimeModelOption[], currentModel: string) {
+      console.log();
+      for (const model of models) {
+        const isCurrent = model.id === currentModel;
+        const marker = isCurrent ? pc.green("current") : pc.gray("available");
+        console.log(`${LIST_BULLET} ${pc.cyan(model.label)} ${pc.gray("-")} ${marker}`);
       }
       console.log();
     },

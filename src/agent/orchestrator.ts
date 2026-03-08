@@ -40,6 +40,14 @@ export class Orchestrator {
     return this.mode;
   }
 
+  public getRuntimeConfig(): PersistedRuntimeSettings {
+    return { ...this.runtime };
+  }
+
+  public setRuntimeModel(model: string) {
+    this.runtime.model = model.trim();
+  }
+
   public async getHistorySnapshot() {
     await this.ready;
     return JSON.parse(JSON.stringify(this.history));

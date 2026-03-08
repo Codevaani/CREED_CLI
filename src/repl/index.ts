@@ -2,7 +2,13 @@ import readline from "readline";
 import pc from "picocolors";
 import { execSync } from "child_process";
 import { Orchestrator, type OrchestratorEvent } from "../agent/orchestrator";
-import { getCliSettings, getCliSettingsWarnings, type ResolvedCliSettings } from "../config/settings";
+import {
+  getCliSettings,
+  getCliSettingsWarnings,
+  saveUserRuntimeSettings,
+  type ResolvedCliSettings,
+} from "../config/settings";
+import { listRuntimeModels, type RuntimeModelOption } from "../runtime/client";
 import {
   applySlashCommandSelection,
   executeSlashCommand,
@@ -37,6 +43,14 @@ interface ResumePickerState {
   visible: boolean;
   sessions: StoredSessionSummary[];
   selection: number;
+}
+
+interface ModelPickerState {
+  visible: boolean;
+  loading: boolean;
+  models: RuntimeModelOption[];
+  selection: number;
+  error: string | null;
 }
 
 function safeGitBranch(): string {
@@ -221,6 +235,67 @@ function buildResumePickerLines(resumePicker: ResumePickerState, width: number) 
   return rows;
 }
 
+function buildModelPickerLines(modelPicker: ModelPickerState, currentModel: string, width: number) {
+  if (!modelPicker.visible) return [];
+
+  if (modelPicker.loading) {
+    return [
+      { text: "Loading models from the configured provider...", selected: false },
+      { text: "Press Esc to cancel.", selected: false },
+    ];
+  }
+
+  if (modelPicker.error) {
+    return [
+      { text: modelPicker.error, selected: false },
+      { text: "Press Esc to close.", selected: false },
+    ];
+  }
+
+  if (modelPicker.models.length === 0) {
+    return [
+      { text: "No models were returned by the current provider.", selected: false },
+      { text: "Press Esc to close.", selected: false },
+    ];
+  }
+
+  const maxVisibleModels = 8;
+  const clampedSelection = Math.max(0, Math.min(modelPicker.selection, modelPicker.models.length - 1));
+  const windowStart = Math.max(
+    0,
+    Math.min(
+      clampedSelection - Math.floor(maxVisibleModels / 2),
+      Math.max(0, modelPicker.models.length - maxVisibleModels),
+    ),
+  );
+  const visibleModels = modelPicker.models.slice(windowStart, windowStart + maxVisibleModels);
+  const rows = visibleModels.flatMap((model, index) => {
+    const absoluteIndex = windowStart + index;
+    const isCurrent = model.id === currentModel;
+    const displayLabel = model.label !== model.id ? `${model.label}` : model.id;
+    const label = isCurrent ? `${displayLabel}  [current]` : displayLabel;
+
+    return wrapWithPrefix(`${absoluteIndex + 1}. `, label, width).map((textLine) => ({
+      text: textLine,
+      selected: absoluteIndex === clampedSelection,
+    }));
+  });
+
+  if (modelPicker.models.length > maxVisibleModels) {
+    rows.push({
+      text: `Showing ${windowStart + 1}-${windowStart + visibleModels.length} of ${modelPicker.models.length}`,
+      selected: false,
+    });
+  }
+
+  rows.push({
+    text: "Enter to switch  Esc to cancel",
+    selected: false,
+  });
+
+  return rows;
+}
+
 function renderWelcome(branch: string, settings: ResolvedCliSettings) {
   console.clear();
   const frameWidth = getFrameWidth();
@@ -271,15 +346,21 @@ function buildInputFrame(
   cursor: number,
   selection: number,
   resumePicker: ResumePickerState,
+  modelPicker: ModelPickerState,
+  currentModel: string,
   statusLabel?: string,
   width = getInputFrameWidth(),
 ) {
   const inner = width - 2;
-  const detailLines = resumePicker.visible
-    ? buildResumePickerLines(resumePicker, Math.max(12, inner - 2))
-    : buildSlashHintLines(input, Math.max(12, inner - 2), selection);
-  const rightLabel = resumePicker.visible
-    ? pc.gray("resume picker")
+  const detailLines = modelPicker.visible
+    ? buildModelPickerLines(modelPicker, currentModel, Math.max(12, inner - 2))
+    : resumePicker.visible
+      ? buildResumePickerLines(resumePicker, Math.max(12, inner - 2))
+      : buildSlashHintLines(input, Math.max(12, inner - 2), selection);
+  const rightLabel = modelPicker.visible
+    ? pc.gray(modelPicker.loading ? "loading models" : "model picker")
+    : resumePicker.visible
+      ? pc.gray("resume picker")
     : detailLines.length > 0
       ? pc.gray("command mode")
       : statusLabel ?? pc.gray("live entry");
@@ -329,11 +410,22 @@ function renderInputEditor(
   cursor: number,
   selection: number,
   resumePicker: ResumePickerState,
+  modelPicker: ModelPickerState,
+  currentModel: string,
   statusLabel?: string,
   options?: { fresh?: boolean; width?: number },
 ) {
   const width = options?.width ?? getInputFrameWidth();
-  const frame = buildInputFrame(input, cursor, selection, resumePicker, statusLabel, width);
+  const frame = buildInputFrame(
+    input,
+    cursor,
+    selection,
+    resumePicker,
+    modelPicker,
+    currentModel,
+    statusLabel,
+    width,
+  );
   const frameLines = [frame.top, frame.row, ...frame.hintRows, frame.bottom];
 
   if (hasRenderedInputEditor && lastInputFrameHeight === frame.height) {
@@ -419,6 +511,13 @@ function startInteractiveRepl() {
     sessions: [],
     selection: 0,
   };
+  let modelPicker: ModelPickerState = {
+    visible: false,
+    loading: false,
+    models: [],
+    selection: 0,
+    error: null,
+  };
 
   const syncSlashSelection = () => {
     slashSelection = normalizeSlashSelection(currentInput, slashSelection);
@@ -435,6 +534,20 @@ function startInteractiveRepl() {
       visible: false,
       sessions: [],
       selection: 0,
+    };
+
+    if (clearInput) {
+      resetInputState();
+    }
+  };
+
+  const closeModelPicker = (clearInput = false) => {
+    modelPicker = {
+      visible: false,
+      loading: false,
+      models: [],
+      selection: 0,
+      error: null,
     };
 
     if (clearInput) {
@@ -460,7 +573,16 @@ function startInteractiveRepl() {
 
   const renderEditor = (options?: { fresh?: boolean; width?: number }) => {
     syncSlashSelection();
-    renderInputEditor(currentInput, cursor, slashSelection, resumePicker, getStatusDisplayLabel(), options);
+    renderInputEditor(
+      currentInput,
+      cursor,
+      slashSelection,
+      resumePicker,
+      modelPicker,
+      settings.runtime.model,
+      getStatusDisplayLabel(),
+      options,
+    );
   };
 
   const clearCtrlCExitState = () => {
@@ -571,6 +693,7 @@ function startInteractiveRepl() {
   };
 
   const openResumePicker = async () => {
+    closeModelPicker();
     const sessions = await listSavedSessions();
     if (sessions.length === 0) {
       renderOutputEvent({
@@ -588,6 +711,123 @@ function startInteractiveRepl() {
       sessions,
       selection: 0,
     };
+  };
+
+  const openModelPicker = async () => {
+    closeResumePicker();
+    currentInput = "";
+    cursor = 0;
+    slashSelection = -1;
+    modelPicker = {
+      visible: true,
+      loading: true,
+      models: [],
+      selection: 0,
+      error: null,
+    };
+    renderEditor({ fresh: true });
+
+    try {
+      const runtimeConfig = orchestrator.getRuntimeConfig();
+      const models = await listRuntimeModels(runtimeConfig);
+      const currentModelIndex = models.findIndex((model) => model.id === runtimeConfig.model);
+
+      modelPicker = {
+        visible: true,
+        loading: false,
+        models,
+        selection: currentModelIndex >= 0 ? currentModelIndex : 0,
+        error: models.length === 0 ? "No models were returned by the current provider." : null,
+      };
+    } catch (error) {
+      modelPicker = {
+        visible: true,
+        loading: false,
+        models: [],
+        selection: 0,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    renderEditor({ fresh: true });
+  };
+
+  const applySelectedModel = async (model: RuntimeModelOption) => {
+    const runtimeConfig = orchestrator.getRuntimeConfig();
+    const nextRuntime = {
+      ...runtimeConfig,
+      model: model.id,
+    };
+
+    await saveUserRuntimeSettings(nextRuntime);
+    orchestrator.setRuntimeModel(model.id);
+    settings.runtime.model = model.id;
+    closeModelPicker(true);
+    renderOutputEvent({
+      type: "notice",
+      message: `Active model switched to ${model.id}.`,
+    });
+  };
+
+  const selectModelByQuery = async (query: string) => {
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) {
+      await openModelPicker();
+      return;
+    }
+
+    const models = await listRuntimeModels(orchestrator.getRuntimeConfig());
+    if (models.length === 0) {
+      renderOutputEvent({
+        type: "notice",
+        message: "No models were returned by the current provider.",
+      });
+      return;
+    }
+
+    const exactMatch = models.find((model) => model.id.toLowerCase() === normalizedQuery.toLowerCase());
+    if (exactMatch) {
+      await applySelectedModel(exactMatch);
+      return;
+    }
+
+    const partialMatches = models.filter((model) =>
+      model.id.toLowerCase().includes(normalizedQuery.toLowerCase()),
+    );
+
+    if (partialMatches.length === 1) {
+      await applySelectedModel(partialMatches[0]!);
+      return;
+    }
+
+    if (partialMatches.length > 1) {
+      renderOutputEvent({
+        type: "notice",
+        message: `Multiple models matched "${normalizedQuery}". Use /model and pick one from the list.`,
+      });
+      return;
+    }
+
+    renderOutputEvent({
+      type: "notice",
+      message: `No model matched "${normalizedQuery}". Use /model to browse available models.`,
+    });
+  };
+
+  const selectCurrentModelFromPicker = async () => {
+    if (!modelPicker.visible || modelPicker.loading || modelPicker.models.length === 0) {
+      closeModelPicker(true);
+      renderEditor({ fresh: true });
+      return;
+    }
+
+    const selectedModel = modelPicker.models[modelPicker.selection];
+    if (!selectedModel) {
+      return;
+    }
+
+    await applySelectedModel(selectedModel);
+    renderEditor({ fresh: true });
   };
 
   const resumeSelectedSession = async () => {
@@ -712,6 +952,7 @@ function startInteractiveRepl() {
     clearInputEditor();
     resetInputState();
     closeResumePicker();
+    closeModelPicker();
 
     const commandResult = await executeSlashCommand(normalizedInput, {
       showCommandList(commands) {
@@ -728,6 +969,18 @@ function startInteractiveRepl() {
       },
       async resumeSession() {
         await openResumePicker();
+        renderEditor({ fresh: true });
+      },
+      async selectModel(input) {
+        const query = input.replace(/^\/model\b/i, "").trim();
+        try {
+          await selectModelByQuery(query);
+        } catch (error) {
+          renderOutputEvent({
+            type: "error",
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
         renderEditor({ fresh: true });
       },
     });
@@ -784,7 +1037,7 @@ function startInteractiveRepl() {
     ) {
       renderOutputEvent({
         type: "notice",
-        message: "Wait for the current response before using /help, /clear, or /resume.",
+        message: "Wait for the current response before using /help, /clear, /resume, or /model.",
       });
       return;
     }
@@ -822,6 +1075,45 @@ function startInteractiveRepl() {
     }
 
     lastInputActivityAt = Date.now();
+
+    if (modelPicker.visible) {
+      if (key.name === "up" || (key.shift && key.name === "tab")) {
+        const modelCount = modelPicker.models.length;
+        if (modelCount > 0) {
+          modelPicker = {
+            ...modelPicker,
+            selection: modelPicker.selection <= 0 ? modelCount - 1 : modelPicker.selection - 1,
+          };
+          renderEditor();
+        }
+        return;
+      }
+
+      if (key.name === "down" || key.name === "tab") {
+        const modelCount = modelPicker.models.length;
+        if (modelCount > 0) {
+          modelPicker = {
+            ...modelPicker,
+            selection: modelPicker.selection >= modelCount - 1 ? 0 : modelPicker.selection + 1,
+          };
+          renderEditor();
+        }
+        return;
+      }
+
+      if (key.name === "return" || key.name === "enter") {
+        await selectCurrentModelFromPicker();
+        return;
+      }
+
+      if (key.name === "escape" || key.name === "backspace" || (key.ctrl && key.name === "u")) {
+        closeModelPicker(true);
+        renderEditor({ fresh: true });
+        return;
+      }
+
+      return;
+    }
 
     if (resumePicker.visible) {
       if (key.name === "up" || (key.shift && key.name === "tab")) {
@@ -1002,6 +1294,57 @@ function startNonInteractiveRepl() {
     });
   };
 
+  const listAvailableModels = async () => {
+    const runtimeConfig = orchestrator.getRuntimeConfig();
+    const models = await listRuntimeModels(runtimeConfig);
+    if (models.length === 0) {
+      output.renderEvent({
+        type: "notice",
+        message: "No models were returned by the current provider.",
+      });
+      return;
+    }
+
+    output.renderModelList(models, runtimeConfig.model);
+  };
+
+  const switchModelFromCommand = async (input: string) => {
+    const query = input.replace(/^\/model\b/i, "").trim();
+    if (!query) {
+      await listAvailableModels();
+      return;
+    }
+
+    const models = await listRuntimeModels(orchestrator.getRuntimeConfig());
+    const exactMatch = models.find((model) => model.id.toLowerCase() === query.toLowerCase());
+    const partialMatches = models.filter((model) => model.id.toLowerCase().includes(query.toLowerCase()));
+    const selectedModel = exactMatch ?? (partialMatches.length === 1 ? partialMatches[0] : null);
+
+    if (!selectedModel) {
+      output.renderEvent({
+        type: "notice",
+        message:
+          partialMatches.length > 1
+            ? `Multiple models matched "${query}". Use /model to list and choose one exact id.`
+            : `No model matched "${query}". Use /model to list available models.`,
+      });
+      return;
+    }
+
+    const nextRuntime = {
+      ...orchestrator.getRuntimeConfig(),
+      model: selectedModel.id,
+    };
+
+    await saveUserRuntimeSettings(nextRuntime);
+    orchestrator.setRuntimeModel(selectedModel.id);
+    settings.runtime.model = selectedModel.id;
+    output.renderEvent({
+      type: "notice",
+      message: `Active model switched to ${selectedModel.id}.`,
+    });
+  };
+
   updatePrompt();
   rl.prompt();
 
@@ -1020,6 +1363,9 @@ function startNonInteractiveRepl() {
       },
       async resumeSession() {
         await resumeLatestSession();
+      },
+      async selectModel(input) {
+        await switchModelFromCommand(input);
       },
     });
 

@@ -29,6 +29,11 @@ export interface RuntimeConnectionTestResult {
   replyPreview: string;
 }
 
+export interface RuntimeModelOption {
+  id: string;
+  label: string;
+}
+
 function normalizeBaseUrl(baseUrl: string) {
   return baseUrl.trim().replace(/\/+$/, "");
 }
@@ -67,6 +72,35 @@ function buildAnthropicMessagesUrl(baseUrl: string) {
   }
 
   return `${normalized}/v1/messages`;
+}
+
+function buildAnthropicModelsUrl(baseUrl: string) {
+  const normalized = normalizeBaseUrl(baseUrl);
+
+  if (normalized.endsWith("/v1/messages")) {
+    return `${normalized.slice(0, -"/messages".length)}/models`;
+  }
+
+  if (normalized.endsWith("/v1")) {
+    return `${normalized}/models`;
+  }
+
+  return `${normalized}/v1/models`;
+}
+
+function sortRuntimeModels(models: RuntimeModelOption[], currentModel: string) {
+  const current = currentModel.trim().toLowerCase();
+
+  return [...models].sort((left, right) => {
+    const leftCurrent = left.id.toLowerCase() === current;
+    const rightCurrent = right.id.toLowerCase() === current;
+
+    if (leftCurrent !== rightCurrent) {
+      return leftCurrent ? -1 : 1;
+    }
+
+    return left.id.localeCompare(right.id);
+  });
 }
 
 function mergeAnthropicUserBlocks(messages: Array<{ role: "user" | "assistant"; content: any[] }>, blocks: any[]) {
@@ -449,6 +483,53 @@ async function testAnthropicCompatibleConnection(config: PersistedRuntimeSetting
   );
 }
 
+async function listOpenAiCompatibleModels(config: PersistedRuntimeSettings) {
+  const client = new OpenAI({
+    baseURL: config.baseUrl,
+    apiKey: config.apiKey,
+  });
+
+  const response = await client.models.list();
+  const models = (response.data ?? [])
+    .map((model: any) => ({
+      id: String(model.id),
+      label: String(model.id),
+    }))
+    .filter((model) => model.id.trim().length > 0);
+
+  return sortRuntimeModels(models, config.model);
+}
+
+async function listAnthropicCompatibleModels(config: PersistedRuntimeSettings) {
+  const response = await fetch(buildAnthropicModelsUrl(config.baseUrl), {
+    method: "GET",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": config.apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+  });
+
+  const responseBody = await parseResponseBody(response);
+  if (!response.ok) {
+    throw new Error(extractApiErrorMessage(responseBody, response.status, response.statusText));
+  }
+
+  const models = Array.isArray((responseBody as Record<string, any>)?.data)
+    ? (responseBody as Record<string, any>).data
+        .map((model: Record<string, any>) => ({
+          id: typeof model.id === "string" ? model.id : "",
+          label:
+            typeof model.display_name === "string" && model.display_name.trim()
+              ? `${model.display_name} (${model.id})`
+              : String(model.id ?? ""),
+        }))
+        .filter((model: RuntimeModelOption) => model.id.trim().length > 0)
+    : [];
+
+  return sortRuntimeModels(models, config.model);
+}
+
 export async function testRuntimeConnection(
   config: PersistedRuntimeSettings,
 ): Promise<RuntimeConnectionTestResult> {
@@ -463,4 +544,12 @@ export async function testRuntimeConnection(
     model: config.model.trim(),
     replyPreview,
   };
+}
+
+export async function listRuntimeModels(config: PersistedRuntimeSettings): Promise<RuntimeModelOption[]> {
+  if (config.provider === "anthropic-compatible") {
+    return listAnthropicCompatibleModels(config);
+  }
+
+  return listOpenAiCompatibleModels(config);
 }
