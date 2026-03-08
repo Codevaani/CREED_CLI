@@ -79,7 +79,7 @@ const DEFAULT_SETTINGS: ResolvedCliSettings = {
   },
   webSearch: {
     endpoint: "https://html.duckduckgo.com/html/",
-    maxResults: 5,
+    maxResults: 50,
   },
   ui: {
     showShellStatusLine: true,
@@ -448,6 +448,26 @@ export async function saveUserRuntimeSettings(runtime: PersistedRuntimeSettings)
 
   await fs.promises.mkdir(path.dirname(settingsPath), { recursive: true });
   await fs.promises.writeFile(settingsPath, `${JSON.stringify(nextSettings, null, 2)}\n`, "utf-8");
+  clearCliSettingsCache();
+}
+
+export async function clearUserRuntimeSettings() {
+  const settingsPath = getUserSettingsPath();
+  if (!fs.existsSync(settingsPath)) {
+    clearCliSettingsCache();
+    return;
+  }
+
+  const existingSettings = readExistingSettingsObject(settingsPath);
+  const nextSettings = { ...existingSettings } as Record<string, unknown>;
+  delete nextSettings.runtime;
+
+  if (Object.keys(nextSettings).length === 0) {
+    await fs.promises.rm(settingsPath, { force: true });
+  } else {
+    await fs.promises.writeFile(settingsPath, `${JSON.stringify(nextSettings, null, 2)}\n`, "utf-8");
+  }
+
   clearCliSettingsCache();
 }
 

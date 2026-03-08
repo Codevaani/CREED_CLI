@@ -57,6 +57,12 @@ Explicit command form:
 bun run index.ts chat
 ```
 
+Full CLI help:
+
+```bash
+bun run index.ts --help
+```
+
 ## First Run Setup
 
 When you start chat without runtime config, CREED CLI opens an interactive setup wizard in TTY mode. The wizard lets you:
@@ -148,6 +154,28 @@ The input UI also supports:
 - arrow key navigation for command and picker flows
 - tab completion for slash commands
 - double `Ctrl+C` confirmation before closing
+
+## Top-Level Commands
+
+CREED CLI now exposes a larger command surface from the root binary:
+
+- `chat` starts the interactive coding REPL
+- `exec` runs one prompt non-interactively
+- `review` runs a non-interactive review prompt against the workspace
+- `login` opens the runtime setup flow
+- `logout` removes saved user runtime credentials
+- `resume` opens or restores saved conversations
+- `fork` starts a new branch of a saved conversation
+- `sandbox`, `debug`, and `features` expose runtime inspection helpers
+
+Reserved command names also exist for future surfaces:
+
+- `mcp`
+- `mcp-server`
+- `app-server`
+- `completion`
+- `apply`
+- `cloud`
 
 ## Sessions And Resume
 

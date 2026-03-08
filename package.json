@@ -4,7 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "bun run index.ts chat",
+    "dev": "bun run index.ts",
     "chat": "bun run index.ts chat"
   },
   "devDependencies": {

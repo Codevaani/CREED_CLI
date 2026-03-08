@@ -43,6 +43,7 @@ interface ResumePickerState {
   visible: boolean;
   sessions: StoredSessionSummary[];
   selection: number;
+  mode: "resume" | "fork";
 }
 
 interface ModelPickerState {
@@ -51,6 +52,13 @@ interface ModelPickerState {
   models: RuntimeModelOption[];
   selection: number;
   error: string | null;
+}
+
+export interface StartReplOptions {
+  resumeLatest?: boolean;
+  openResumePicker?: boolean;
+  forkLatest?: boolean;
+  openForkPicker?: boolean;
 }
 
 function safeGitBranch(): string {
@@ -189,6 +197,10 @@ function formatSessionSavedAt(savedAt: string) {
   }
 }
 
+function getResumePickerModeLabel(mode: ResumePickerState["mode"]) {
+  return mode === "fork" ? "fork picker" : "resume picker";
+}
+
 function buildResumePickerLines(resumePicker: ResumePickerState, width: number) {
   if (!resumePicker.visible) return [];
 
@@ -228,7 +240,7 @@ function buildResumePickerLines(resumePicker: ResumePickerState, width: number) 
   }
 
   rows.push({
-    text: "Enter to resume  Esc to cancel",
+    text: resumePicker.mode === "fork" ? "Enter to fork  Esc to cancel" : "Enter to resume  Esc to cancel",
     selected: false,
   });
 
@@ -360,10 +372,10 @@ function buildInputFrame(
   const rightLabel = modelPicker.visible
     ? pc.gray(modelPicker.loading ? "loading models" : "model picker")
     : resumePicker.visible
-      ? pc.gray("resume picker")
-    : detailLines.length > 0
-      ? pc.gray("command mode")
-      : statusLabel ?? pc.gray("live entry");
+      ? pc.gray(getResumePickerModeLabel(resumePicker.mode))
+      : detailLines.length > 0
+        ? pc.gray("command mode")
+        : statusLabel ?? pc.gray("live entry");
   const rightText = ` ${fitVisible(rightLabel, Math.max(10, inner - 8))} `;
   const filler = BOX.horizontal.repeat(
     Math.max(1, inner - 1 - visibleLength(rightText)),
@@ -487,7 +499,7 @@ function renderStartupWarnings(warnings: readonly string[]) {
   }
 }
 
-function startInteractiveRepl() {
+function startInteractiveRepl(options: StartReplOptions = {}) {
   const settings = getCliSettings();
   const settingsWarnings = getCliSettingsWarnings();
   const orchestrator = new Orchestrator();
@@ -510,6 +522,7 @@ function startInteractiveRepl() {
     visible: false,
     sessions: [],
     selection: 0,
+    mode: "resume",
   };
   let modelPicker: ModelPickerState = {
     visible: false,
@@ -534,6 +547,7 @@ function startInteractiveRepl() {
       visible: false,
       sessions: [],
       selection: 0,
+      mode: "resume",
     };
 
     if (clearInput) {
@@ -675,11 +689,15 @@ function startInteractiveRepl() {
     await saveSession(currentSessionId, history);
   };
 
-  const renderResumedSession = async (sessionId: string, history: any[]) => {
+  const activateStoredSessionHistory = async (
+    mode: ResumePickerState["mode"],
+    sessionId: string,
+    history: any[],
+  ) => {
     stopThinkingStatus();
     pendingInputs = [];
     isProcessing = false;
-    currentSessionId = sessionId;
+    currentSessionId = mode === "fork" ? createSessionId() : sessionId;
     await orchestrator.restoreHistory(history);
     await saveSession(currentSessionId, history);
     closeResumePicker(true);
@@ -688,17 +706,17 @@ function startInteractiveRepl() {
     output.renderHistory(history);
     renderOutputEvent({
       type: "notice",
-      message: `Resumed session with ${countSessionTurns(history)} user turn(s).`,
+      message: `${mode === "fork" ? "Forked" : "Resumed"} session with ${countSessionTurns(history)} user turn(s).`,
     });
   };
 
-  const openResumePicker = async () => {
+  const openResumePicker = async (mode: ResumePickerState["mode"] = "resume") => {
     closeModelPicker();
     const sessions = await listSavedSessions();
     if (sessions.length === 0) {
       renderOutputEvent({
         type: "notice",
-        message: "No saved session found yet. Start a conversation first.",
+        message: `No saved session found yet. Start a conversation before trying to ${mode}.`,
       });
       return;
     }
@@ -710,6 +728,7 @@ function startInteractiveRepl() {
       visible: true,
       sessions,
       selection: 0,
+      mode,
     };
   };
 
@@ -852,7 +871,7 @@ function startInteractiveRepl() {
       return;
     }
 
-    await renderResumedSession(storedSession.id, storedSession.history);
+    await activateStoredSessionHistory(resumePicker.mode, storedSession.id, storedSession.history);
     renderEditor({ fresh: true });
   };
 
@@ -968,7 +987,7 @@ function startInteractiveRepl() {
         closeSession();
       },
       async resumeSession() {
-        await openResumePicker();
+        await openResumePicker("resume");
         renderEditor({ fresh: true });
       },
       async selectModel(input) {
@@ -1239,9 +1258,37 @@ function startInteractiveRepl() {
   };
 
   process.stdin.on("keypress", onKeypress);
+
+  const runInitialLaunchAction = async () => {
+    if (options.resumeLatest || options.forkLatest) {
+      const savedSession = await loadLatestSession();
+      if (!savedSession) {
+        renderOutputEvent({
+          type: "notice",
+          message: "No saved session found yet. Start a conversation first.",
+        });
+        return;
+      }
+
+      await activateStoredSessionHistory(
+        options.forkLatest ? "fork" : "resume",
+        savedSession.id,
+        savedSession.history,
+      );
+      renderEditor({ fresh: true });
+      return;
+    }
+
+    if (options.openResumePicker || options.openForkPicker) {
+      await openResumePicker(options.openForkPicker ? "fork" : "resume");
+      renderEditor({ fresh: true });
+    }
+  };
+
+  void runInitialLaunchAction();
 }
 
-function startNonInteractiveRepl() {
+async function startNonInteractiveRepl(options: StartReplOptions = {}) {
   const settings = getCliSettings();
   const settingsWarnings = getCliSettingsWarnings();
   const orchestrator = new Orchestrator();
@@ -1291,6 +1338,26 @@ function startNonInteractiveRepl() {
     output.renderEvent({
       type: "notice",
       message: `Resumed latest session with ${countSessionTurns(savedSession.history)} user turn(s).`,
+    });
+  };
+
+  const forkLatestSession = async () => {
+    const savedSession = await loadLatestSession();
+    if (!savedSession) {
+      output.renderEvent({
+        type: "notice",
+        message: "No saved session found yet. Start a conversation first.",
+      });
+      return;
+    }
+
+    currentSessionId = createSessionId();
+    await orchestrator.restoreHistory(savedSession.history);
+    await saveSession(currentSessionId, savedSession.history);
+    output.renderHistory(savedSession.history);
+    output.renderEvent({
+      type: "notice",
+      message: `Forked latest session with ${countSessionTurns(savedSession.history)} user turn(s).`,
     });
   };
 
@@ -1345,8 +1412,32 @@ function startNonInteractiveRepl() {
     });
   };
 
-  updatePrompt();
-  rl.prompt();
+  if (options.resumeLatest) {
+    await resumeLatestSession();
+    updatePrompt();
+    rl.prompt();
+  } else if (options.forkLatest) {
+    await forkLatestSession();
+    updatePrompt();
+    rl.prompt();
+  } else if (options.openResumePicker || options.openForkPicker) {
+    output.renderEvent({
+      type: "notice",
+      message: "Interactive session picker is not available here. Using the latest saved session instead.",
+    });
+
+    if (options.openForkPicker) {
+      await forkLatestSession();
+    } else {
+      await resumeLatestSession();
+    }
+
+    updatePrompt();
+    rl.prompt();
+  } else {
+    updatePrompt();
+    rl.prompt();
+  }
 
   const handleSlashCommand = (input: string) =>
     executeSlashCommand(input, {
@@ -1483,11 +1574,11 @@ function startNonInteractiveRepl() {
   });
 }
 
-export function startRepl() {
+export function startRepl(options: StartReplOptions = {}) {
   if (process.stdin.isTTY && process.stdout.isTTY) {
-    startInteractiveRepl();
+    startInteractiveRepl(options);
     return;
   }
 
-  startNonInteractiveRepl();
+  void startNonInteractiveRepl(options);
 }
