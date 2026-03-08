@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { exec } from "child_process";
 import util from "util";
+import { getCliSettings } from "../config/settings";
 
 const execAsync = util.promisify(exec);
 const EXISTING_CODE_MARKERS = [
@@ -11,6 +12,11 @@ const EXISTING_CODE_MARKERS = [
 ];
 const DIFF_CONTEXT_LINES = 2;
 const MAX_DIFF_LINES = 28;
+type WebSearchResult = {
+  title: string;
+  url: string;
+  snippet: string;
+};
 
 function resolveWorkspacePath(workspaceRoot: string, targetPath: string) {
   const resolvedPath = path.resolve(workspaceRoot, targetPath);
@@ -136,8 +142,8 @@ function buildUpdateDiff(filePath: string, beforeContent: string, afterContent: 
   const afterContext = beforeLines.slice(beforeLines.length - suffix, contextEnd);
   const hunkLines = [
     ...beforeContext.map((line) => ` ${line}`),
-    ...removedLines.map((line) => `-${line}`),
     ...addedLines.map((line) => `+${line}`),
+    ...removedLines.map((line) => `-${line}`),
     ...afterContext.map((line) => ` ${line}`),
   ];
 
@@ -155,8 +161,117 @@ function buildUpdateDiff(filePath: string, beforeContent: string, afterContent: 
   ].join("\n");
 }
 
+function decodeHtmlEntities(text: string) {
+  return text
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) =>
+      String.fromCodePoint(Number.parseInt(hex, 16)),
+    )
+    .replace(/&#(\d+);/g, (_, decimal: string) =>
+      String.fromCodePoint(Number.parseInt(decimal, 10)),
+    )
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function stripHtmlTags(text: string) {
+  return text.replace(/<[^>]+>/g, " ");
+}
+
+function normalizeWebText(text: string) {
+  return decodeHtmlEntities(stripHtmlTags(text)).replace(/\s+/g, " ").trim();
+}
+
+function resolveSearchResultUrl(rawHref: string) {
+  const decodedHref = decodeHtmlEntities(rawHref);
+  const absoluteHref = decodedHref.startsWith("//")
+    ? `https:${decodedHref}`
+    : decodedHref;
+
+  try {
+    const url = new URL(absoluteHref);
+    const redirectedUrl = url.searchParams.get("uddg");
+    return redirectedUrl ? decodeURIComponent(redirectedUrl) : absoluteHref;
+  } catch {
+    return absoluteHref;
+  }
+}
+
+function parseDuckDuckGoResults(html: string, maxResults: number): WebSearchResult[] {
+  const results: WebSearchResult[] = [];
+  const blocks = html.split('<div class="links_main links_deep result__body">');
+
+  for (const block of blocks.slice(1)) {
+    const titleMatch = block.match(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+    const snippetMatch = block.match(/<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i);
+
+    const rawHref = titleMatch?.[1];
+    const rawTitle = titleMatch?.[2];
+    const rawSnippet = snippetMatch?.[1] ?? "";
+
+    if (!rawHref || !rawTitle) {
+      continue;
+    }
+
+    const title = normalizeWebText(rawTitle);
+    const url = resolveSearchResultUrl(rawHref);
+    const snippet = normalizeWebText(rawSnippet);
+
+    if (!title || !url) {
+      continue;
+    }
+
+    results.push({ title, url, snippet });
+
+    if (results.length >= maxResults) {
+      break;
+    }
+  }
+
+  return results;
+}
+
+async function performWebSearch(searchTerm: string) {
+  const settings = getCliSettings();
+  const endpoint = settings.webSearch.endpoint;
+  const resultLimit = settings.webSearch.maxResults;
+
+  const searchUrl = new URL(endpoint);
+  searchUrl.searchParams.set("q", searchTerm);
+
+  const response = await fetch(searchUrl.toString(), {
+    headers: {
+      "user-agent": "creed-cli/1.0 (+https://duckduckgo.com/html/)",
+      accept: "text/html,application/xhtml+xml",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Search request failed with status ${response.status}.`);
+  }
+
+  const html = await response.text();
+  const results = parseDuckDuckGoResults(html, resultLimit);
+
+  if (results.length === 0) {
+    return `No web results found for "${searchTerm}".`;
+  }
+
+  return [
+    `Web results for "${searchTerm}":`,
+    ...results.flatMap((result, index) => [
+      `${index + 1}. ${result.title}`,
+      `   URL: ${result.url}`,
+      `   Snippet: ${result.snippet || "No snippet available."}`,
+    ]),
+  ].join("\n");
+}
+
 export async function executeTool(name: string, args: any): Promise<string> {
   const workspaceRoot = path.resolve(process.cwd());
+  const settings = getCliSettings(workspaceRoot);
 
   try {
     switch (name) {
@@ -188,7 +303,7 @@ export async function executeTool(name: string, args: any): Promise<string> {
 
       case "run_terminal_cmd": {
         const { command, is_background } = args;
-        if (process.env.CREED_ENABLE_UNSAFE_COMMAND_TOOL !== "1") {
+        if (!settings.shell.enableUnsafeCommands) {
           return `Command execution is disabled in this session. Proposed command: ${command}`;
         }
 
@@ -249,6 +364,15 @@ export async function executeTool(name: string, args: any): Promise<string> {
           await fs.writeFile(targetPath, code_edit, "utf-8");
           return buildCreateDiff(target_file, code_edit);
         }
+      }
+
+      case "web_search": {
+        const { search_term } = args;
+        if (!search_term || typeof search_term !== "string") {
+          return "Error: search_term is required for web_search.";
+        }
+
+        return await performWebSearch(search_term);
       }
 
       default:

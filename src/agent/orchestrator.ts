@@ -1,12 +1,9 @@
 import OpenAI from "openai";
 import fs from "fs/promises";
 import path from "path";
+import { getCliSettings } from "../config/settings";
 import { loadTools } from "../tools";
 import { executeTool } from "../tools/executor";
-
-const DEFAULT_BASE_URL = process.env.CREED_BASE_URL ?? process.env.OPENAI_BASE_URL ?? "http://localhost:20128/v1";
-const DEFAULT_API_KEY = process.env.CREED_API_KEY ?? process.env.OPENAI_API_KEY ?? "local-development-key";
-const DEFAULT_MODEL = process.env.CREED_MODEL ?? process.env.OPENAI_MODEL ?? "kr/claude-haiku-4.5";
 
 export type OrchestratorEvent =
   | { type: "notice"; message: string }
@@ -25,13 +22,16 @@ export class Orchestrator {
   private openai: OpenAI;
   private ready: Promise<void>;
   private startupNotice: string | null = null;
+  private model: string;
 
   constructor() {
+    const settings = getCliSettings();
     this.tools = loadTools();
+    this.model = settings.runtime.model;
 
     this.openai = new OpenAI({
-      baseURL: DEFAULT_BASE_URL,
-      apiKey: DEFAULT_API_KEY,
+      baseURL: settings.runtime.baseUrl,
+      apiKey: settings.runtime.apiKey,
     });
 
     this.ready = this.initSystemPrompt();
@@ -103,7 +103,7 @@ export class Orchestrator {
         this.emit(onEvent, { type: "thinking", phase: "start" });
 
         const requestOptions: any = {
-          model: DEFAULT_MODEL,
+          model: this.model,
           messages: this.history,
           stream: true,
         };

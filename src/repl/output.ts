@@ -3,7 +3,19 @@ import type { OrchestratorEvent } from "../agent/orchestrator";
 import type { SlashCommandDefinition } from "./commands";
 
 const ANSI_PATTERN = /\u001b\[[0-9;]*m/g;
-const BULLET = pc.white("\u2022");
+const ASSISTANT_BULLET = pc.green("\u2022");
+const LIST_BULLET = pc.white("\u2022");
+const USER_CHIP_BG = "\u001b[48;5;223m";
+const ANSI_RESET = "\u001b[0m";
+
+type MessageBlock =
+  | { type: "text"; content: string }
+  | { type: "code"; content: string; language: string };
+
+type AssistantSegment =
+  | { type: "paragraph"; text: string }
+  | { type: "section"; text: string }
+  | { type: "item"; text: string };
 
 function stripAnsi(text: string) {
   return text.replace(ANSI_PATTERN, "");
@@ -11,6 +23,10 @@ function stripAnsi(text: string) {
 
 function visibleLength(text: string) {
   return stripAnsi(text).length;
+}
+
+function grayChip(text: string) {
+  return `${USER_CHIP_BG} ${text} ${ANSI_RESET}`;
 }
 
 function wrapPlainText(text: string, width: number): string[] {
@@ -100,6 +116,123 @@ function normalizeMessageItems(text: string): string[] {
   return items;
 }
 
+function normalizeAssistantSegments(text: string) {
+  const segments: AssistantSegment[] = [];
+  let currentParagraph = "";
+
+  const flushParagraph = () => {
+    const normalizedParagraph = currentParagraph.trim();
+    if (normalizedParagraph) {
+      segments.push({ type: "paragraph", text: normalizedParagraph });
+    }
+    currentParagraph = "";
+  };
+
+  for (const rawLine of text.replace(/\r\n/g, "\n").split("\n")) {
+    const trimmedLine = rawLine.trim();
+
+    if (!trimmedLine) {
+      flushParagraph();
+      continue;
+    }
+
+    const listMatch = rawLine.match(/^\s*(?:[-*]|\d+\.)\s+(.*)$/);
+    const quoteMatch = rawLine.match(/^\s*>\s+(.*)$/);
+    const headerMatch = rawLine.match(/^\s*#{1,6}\s+(.*)$/);
+    const cleanedLine = (
+      listMatch?.[1] ??
+      quoteMatch?.[1] ??
+      headerMatch?.[1] ??
+      trimmedLine
+    ).trim();
+
+    if (!cleanedLine) {
+      flushParagraph();
+      continue;
+    }
+
+    if (listMatch) {
+      flushParagraph();
+      segments.push({ type: "item", text: cleanedLine });
+      continue;
+    }
+
+    if (quoteMatch || headerMatch || /:\s*$/.test(cleanedLine)) {
+      flushParagraph();
+      segments.push({ type: "section", text: cleanedLine });
+      continue;
+    }
+
+    currentParagraph = currentParagraph
+      ? `${currentParagraph} ${cleanedLine}`
+      : cleanedLine;
+  }
+
+  flushParagraph();
+  return segments;
+}
+
+function stripInlineMarkdownMarkers(text: string) {
+  return text
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+    .replace(/__([^_\n]+)__/g, "$1");
+}
+
+function splitMarkdownBlocks(text: string): MessageBlock[] {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const blocks: MessageBlock[] = [];
+  let mode: "text" | "code" = "text";
+  let language = "";
+  let current: string[] = [];
+
+  for (const line of lines) {
+    const fenceMatch = line.match(/^```([\w-]+)?\s*$/);
+    if (!fenceMatch) {
+      current.push(line);
+      continue;
+    }
+
+    if (mode === "text") {
+      const textBlock = current.join("\n").trim();
+      if (textBlock) {
+        blocks.push({ type: "text", content: textBlock });
+      }
+
+      current = [];
+      mode = "code";
+      language = fenceMatch[1] ?? "";
+      continue;
+    }
+
+    blocks.push({
+      type: "code",
+      content: current.join("\n"),
+      language,
+    });
+
+    current = [];
+    mode = "text";
+    language = "";
+  }
+
+  const trailingBlock = current.join("\n");
+  if (mode === "code") {
+    blocks.push({
+      type: "code",
+      content: trailingBlock,
+      language,
+    });
+  } else {
+    const textBlock = trailingBlock.trim();
+    if (textBlock) {
+      blocks.push({ type: "text", content: textBlock });
+    }
+  }
+
+  return blocks;
+}
+
 function extractUserQuery(content: string) {
   const match = content.match(/^<user_query>\n?([\s\S]*?)\n?<\/user_query>$/);
   return match?.[1]?.trim() ?? content.trim();
@@ -166,35 +299,115 @@ function renderDiffBlock(name: string, result: string) {
 }
 
 function renderBulletBlock(text: string, width: number) {
-  const items = normalizeMessageItems(text);
-  if (items.length === 0) return;
+  const blocks = splitMarkdownBlocks(text);
+  if (blocks.length === 0) return;
 
-  console.log();
+  let renderedAssistantBullet = false;
+  let pendingTextBlocks: string[] = [];
 
-  for (const item of items) {
-    const wrapped = wrapPlainText(item, Math.max(12, width - 2));
-    wrapped.forEach((line, index) => {
-      if (index === 0) {
-        console.log(`${BULLET} ${line}`);
-      } else {
-        console.log(`  ${line}`);
-      }
-    });
+  const flushPendingText = () => {
+    if (pendingTextBlocks.length === 0) {
+      return;
+    }
+
+    const normalizedSegments = normalizeAssistantSegments(
+      stripInlineMarkdownMarkers(pendingTextBlocks.join("\n")),
+    );
+    pendingTextBlocks = [];
+
+    if (normalizedSegments.length === 0) {
+      return;
+    }
+
     console.log();
+
+    normalizedSegments.forEach((segment, segmentIndex) => {
+      if (!renderedAssistantBullet && segmentIndex === 0) {
+        const wrapped = wrapPlainText(segment.text, Math.max(12, width - 2));
+        wrapped.forEach((line, lineIndex) => {
+          if (lineIndex === 0) {
+            console.log(`${ASSISTANT_BULLET} ${line}`);
+            return;
+          }
+
+          console.log(`  ${line}`);
+        });
+        renderedAssistantBullet = true;
+        return;
+      }
+
+      if (segment.type === "section") {
+        const wrapped = wrapPlainText(segment.text, Math.max(12, width - 2));
+        wrapped.forEach((line) => {
+          console.log(`  ${pc.cyan(line)}`);
+        });
+
+        if (segmentIndex < normalizedSegments.length - 1) {
+          console.log();
+        }
+        return;
+      }
+
+      if (segment.type === "item") {
+        const wrapped = wrapPlainText(segment.text, Math.max(12, width - 6));
+        wrapped.forEach((line, lineIndex) => {
+          if (lineIndex === 0) {
+            console.log(`    ${pc.gray("-")} ${line}`);
+          } else {
+            console.log(`      ${line}`);
+          }
+        });
+        return;
+      }
+
+      const wrapped = wrapPlainText(segment.text, Math.max(12, width - 2));
+      wrapped.forEach((line) => {
+        console.log(`  ${line}`);
+      });
+    });
+
+    console.log();
+    renderedAssistantBullet = true;
+  };
+
+  for (const block of blocks) {
+    if (block.type === "code") {
+      flushPendingText();
+      console.log();
+
+      if (block.language) {
+        console.log(pc.gray(block.language));
+      }
+
+      for (const line of block.content.split("\n")) {
+        console.log(pc.white(line));
+      }
+
+      console.log();
+      continue;
+    }
+
+    pendingTextBlocks.push(block.content);
   }
+
+  flushPendingText();
 }
 
 function renderUserMessage(text: string, width: number) {
   const query = extractUserQuery(text);
+  renderUserQuery(query, width);
+}
+
+function renderUserQuery(query: string, width: number) {
   if (!query) return;
 
   console.log();
-  const wrapped = wrapPlainText(query, Math.max(12, width - 2));
+  const wrapped = wrapPlainText(query, Math.max(12, width - 8));
   wrapped.forEach((line, index) => {
     if (index === 0) {
-      console.log(`${pc.cyan("\u203a")} ${line}`);
+      console.log(grayChip(`${pc.cyan("\u203a")} ${pc.bold(pc.black(line))}`));
     } else {
-      console.log(`  ${line}`);
+      console.log(`  ${grayChip(pc.bold(pc.black(line)))}`);
     }
   });
   console.log();
@@ -275,7 +488,8 @@ function startThinkingIndicator() {
   };
 }
 
-export function createCliOutputRenderer() {
+export function createCliOutputRenderer(options?: { animateThinking?: boolean }) {
+  const animateThinking = options?.animateThinking ?? true;
   let stopThinking = () => {};
 
   const resetThinking = () => {
@@ -289,6 +503,10 @@ export function createCliOutputRenderer() {
 
       switch (event.type) {
         case "thinking":
+          if (!animateThinking) {
+            break;
+          }
+
           if (event.phase === "start") {
             resetThinking();
             stopThinking = startThinkingIndicator();
@@ -316,10 +534,15 @@ export function createCliOutputRenderer() {
       }
     },
 
+    renderUserInput(text: string) {
+      const width = getOutputWidth();
+      renderUserQuery(text.trim(), width);
+    },
+
     renderSlashCommandList(commands: readonly SlashCommandDefinition[]) {
       console.log();
       for (const command of commands) {
-        console.log(`${BULLET} ${pc.cyan(command.name)} ${pc.gray("-")} ${command.description}`);
+        console.log(`${LIST_BULLET} ${pc.cyan(command.name)} ${pc.gray("-")} ${command.description}`);
       }
       console.log();
     },
@@ -357,7 +580,7 @@ export function createCliOutputRenderer() {
 
     renderUnknownCommand(input: string) {
       console.log();
-      console.log(`${BULLET} ${pc.red(`Unknown command: ${input}`)}`);
+      console.log(`${LIST_BULLET} ${pc.red(`Unknown command: ${input}`)}`);
       console.log(pc.gray("  Try /help"));
       console.log();
     },

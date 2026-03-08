@@ -1,7 +1,8 @@
 import readline from "readline";
 import pc from "picocolors";
 import { execSync } from "child_process";
-import { Orchestrator } from "../agent/orchestrator";
+import { Orchestrator, type OrchestratorEvent } from "../agent/orchestrator";
+import { getCliSettings, getCliSettingsWarnings, type ResolvedCliSettings } from "../config/settings";
 import {
   applySlashCommandSelection,
   executeSlashCommand,
@@ -220,14 +221,11 @@ function buildResumePickerLines(resumePicker: ResumePickerState, width: number) 
   return rows;
 }
 
-function renderWelcome(branch: string) {
+function renderWelcome(branch: string, settings: ResolvedCliSettings) {
   console.clear();
   const frameWidth = getFrameWidth();
   const contentWidth = frameWidth;
-  const unsafeShellEnabled = process.env.CREED_ENABLE_UNSAFE_COMMAND_TOOL === "1";
-  const shellStatus = unsafeShellEnabled
-    ? "enabled via CREED_ENABLE_UNSAFE_COMMAND_TOOL=1"
-    : "disabled by default";
+  const shellStatus = settings.shell.enableUnsafeCommands ? "enabled for this session" : "disabled by default";
   const headerText = `${pc.bold(pc.cyan("creed-cli"))} ${pc.gray("\u00b7")} ${pc.gray("natural language coding")}`;
   console.log(headerText);
 
@@ -250,8 +248,10 @@ function renderWelcome(branch: string) {
     console.log(line);
   }
 
-  for (const line of buildKeyValueLines("shell", shellStatus, contentWidth)) {
-    console.log(line);
+  if (settings.ui.showShellStatusLine) {
+    for (const line of buildKeyValueLines("shell", shellStatus, contentWidth)) {
+      console.log(line);
+    }
   }
 
   console.log();
@@ -271,6 +271,7 @@ function buildInputFrame(
   cursor: number,
   selection: number,
   resumePicker: ResumePickerState,
+  statusLabel?: string,
   width = getInputFrameWidth(),
 ) {
   const inner = width - 2;
@@ -281,7 +282,7 @@ function buildInputFrame(
     ? pc.gray("resume picker")
     : detailLines.length > 0
       ? pc.gray("command mode")
-      : pc.gray("live entry");
+      : statusLabel ?? pc.gray("live entry");
   const rightText = ` ${fitVisible(rightLabel, Math.max(10, inner - 8))} `;
   const filler = BOX.horizontal.repeat(
     Math.max(1, inner - 1 - visibleLength(rightText)),
@@ -328,18 +329,34 @@ function renderInputEditor(
   cursor: number,
   selection: number,
   resumePicker: ResumePickerState,
+  statusLabel?: string,
   options?: { fresh?: boolean; width?: number },
 ) {
   const width = options?.width ?? getInputFrameWidth();
-  const frame = buildInputFrame(input, cursor, selection, resumePicker, width);
+  const frame = buildInputFrame(input, cursor, selection, resumePicker, statusLabel, width);
+  const frameLines = [frame.top, frame.row, ...frame.hintRows, frame.bottom];
 
-  if (hasRenderedInputEditor) {
+  if (hasRenderedInputEditor && lastInputFrameHeight === frame.height) {
+    readline.cursorTo(process.stdout, 0);
+    readline.moveCursor(process.stdout, 0, -1);
+
+    for (let index = 0; index < frameLines.length; index += 1) {
+      readline.cursorTo(process.stdout, 0);
+      readline.clearLine(process.stdout, 0);
+      process.stdout.write(frameLines[index]!);
+
+      if (index < frameLines.length - 1) {
+        process.stdout.write("\n");
+      }
+    }
+  } else if (hasRenderedInputEditor) {
     clearInputEditor();
   }
 
-  const output = [frame.top, frame.row, ...frame.hintRows, frame.bottom].join("\n");
+  if (!hasRenderedInputEditor) {
+    process.stdout.write(frameLines.join("\n"));
+  }
 
-  process.stdout.write(output);
   readline.moveCursor(process.stdout, 0, -(frame.height - 2));
   readline.cursorTo(process.stdout, frame.cursorColumn);
   lastInputFrameHeight = frame.height;
@@ -363,15 +380,40 @@ function moveBelowInputEditor() {
   process.stdout.write("\n");
 }
 
+function getStableThinkingFrame(index: number) {
+  const frames = ["thinking   ", "thinking.  ", "thinking.. ", "thinking..."];
+  return frames[index % frames.length] ?? frames[0]!;
+}
+
+function renderStartupWarnings(warnings: readonly string[]) {
+  for (const warning of warnings) {
+    console.log(pc.yellow(warning));
+  }
+
+  if (warnings.length > 0) {
+    console.log();
+  }
+}
+
 function startInteractiveRepl() {
+  const settings = getCliSettings();
+  const settingsWarnings = getCliSettingsWarnings();
   const orchestrator = new Orchestrator();
-  const output = createCliOutputRenderer();
+  const output = createCliOutputRenderer({ animateThinking: false });
   const branch = safeGitBranch();
   let currentSessionId = createSessionId();
   let isProcessing = false;
+  let isThinking = false;
   let currentInput = "";
   let cursor = 0;
   let slashSelection = -1;
+  let pendingInputs: string[] = [];
+  let thinkingFrameIndex = 0;
+  let thinkingTimer: ReturnType<typeof setInterval> | undefined;
+  let lastInputActivityAt = 0;
+  let pendingCtrlCExit = false;
+  let ctrlCExitTimer: ReturnType<typeof setTimeout> | undefined;
+  let sessionClosed = false;
   let resumePicker: ResumePickerState = {
     visible: false,
     sessions: [],
@@ -400,9 +442,110 @@ function startInteractiveRepl() {
     }
   };
 
+  const getStatusDisplayLabel = () => {
+    const queuedLabel =
+      pendingInputs.length > 0 ? pc.gray(` | ${pendingInputs.length} queued`) : "";
+
+    if (isThinking) {
+      return `${pc.cyan(getStableThinkingFrame(thinkingFrameIndex))}${queuedLabel}`;
+    }
+
+    if (isProcessing) {
+      return `${pc.cyan("working    ")}${queuedLabel}`;
+    }
+
+    return undefined;
+  };
+
+
   const renderEditor = (options?: { fresh?: boolean; width?: number }) => {
     syncSlashSelection();
-    renderInputEditor(currentInput, cursor, slashSelection, resumePicker, options);
+    renderInputEditor(currentInput, cursor, slashSelection, resumePicker, getStatusDisplayLabel(), options);
+  };
+
+  const clearCtrlCExitState = () => {
+    pendingCtrlCExit = false;
+
+    if (ctrlCExitTimer) {
+      clearTimeout(ctrlCExitTimer);
+      ctrlCExitTimer = undefined;
+    }
+  };
+
+  const armCtrlCToExit = () => {
+    pendingCtrlCExit = true;
+
+    if (ctrlCExitTimer) {
+      clearTimeout(ctrlCExitTimer);
+    }
+
+    ctrlCExitTimer = setTimeout(() => {
+      pendingCtrlCExit = false;
+      ctrlCExitTimer = undefined;
+    }, settings.ui.ctrlCConfirmTimeoutMs);
+  };
+
+  const stopThinkingStatus = () => {
+    isThinking = false;
+    thinkingFrameIndex = 0;
+
+    if (thinkingTimer) {
+      clearInterval(thinkingTimer);
+      thinkingTimer = undefined;
+    }
+  };
+
+  const startThinkingStatus = () => {
+    isThinking = true;
+
+    if (thinkingTimer) {
+      return;
+    }
+
+    thinkingFrameIndex = 0;
+    thinkingTimer = setInterval(() => {
+      if (Date.now() - lastInputActivityAt < 220) {
+        return;
+      }
+
+      thinkingFrameIndex = (thinkingFrameIndex + 1) % 4;
+
+      if (!sessionClosed && hasRenderedInputEditor) {
+        renderEditor();
+      }
+    }, 180);
+  };
+
+  const renderOutputEvent = (event: OrchestratorEvent) => {
+    if (event.type === "thinking") {
+      if (event.phase === "start") {
+        startThinkingStatus();
+      } else {
+        stopThinkingStatus();
+      }
+
+      if (!sessionClosed) {
+        renderEditor();
+      }
+
+      return;
+    }
+
+    clearInputEditor();
+    output.renderEvent(event);
+
+    if (!sessionClosed) {
+      renderEditor({ fresh: true });
+    }
+  };
+
+  const renderSubmittedInput = (input: string) => {
+    clearInputEditor();
+    output.renderUserInput(input);
+
+    if (!sessionClosed) {
+      renderEditor({ fresh: true });
+    }
   };
 
   const persistSession = async () => {
@@ -411,14 +554,17 @@ function startInteractiveRepl() {
   };
 
   const renderResumedSession = async (sessionId: string, history: any[]) => {
+    stopThinkingStatus();
+    pendingInputs = [];
+    isProcessing = false;
     currentSessionId = sessionId;
     await orchestrator.restoreHistory(history);
     await saveSession(currentSessionId, history);
     closeResumePicker(true);
     console.clear();
-    renderWelcome(branch);
+    renderWelcome(branch, settings);
     output.renderHistory(history);
-    output.renderEvent({
+    renderOutputEvent({
       type: "notice",
       message: `Resumed session with ${countSessionTurns(history)} user turn(s).`,
     });
@@ -427,7 +573,7 @@ function startInteractiveRepl() {
   const openResumePicker = async () => {
     const sessions = await listSavedSessions();
     if (sessions.length === 0) {
-      output.renderEvent({
+      renderOutputEvent({
         type: "notice",
         message: "No saved session found yet. Start a conversation first.",
       });
@@ -459,11 +605,10 @@ function startInteractiveRepl() {
     const storedSession = await loadSessionById(selectedSession.id);
     if (!storedSession) {
       closeResumePicker(true);
-      output.renderEvent({
+      renderOutputEvent({
         type: "error",
         message: "The selected conversation could not be loaded.",
       });
-      renderEditor({ fresh: true });
       return;
     }
 
@@ -505,7 +650,42 @@ function startInteractiveRepl() {
     return true;
   };
 
-  renderWelcome(branch);
+  const processPendingInputs = async () => {
+    if (sessionClosed || isProcessing || pendingInputs.length === 0) {
+      if (!sessionClosed) {
+        renderEditor();
+      }
+      return;
+    }
+
+    const nextInput = pendingInputs.shift();
+    if (!nextInput) {
+      renderEditor();
+      return;
+    }
+
+    isProcessing = true;
+    renderEditor();
+
+    try {
+      await orchestrator.processUserInput(nextInput, renderOutputEvent);
+      await persistSession();
+    } finally {
+      isProcessing = false;
+      stopThinkingStatus();
+
+      if (!sessionClosed) {
+        renderEditor({ fresh: true });
+      }
+    }
+
+    if (pendingInputs.length > 0 && !sessionClosed) {
+      void processPendingInputs();
+    }
+  };
+
+  renderWelcome(branch, settings);
+  renderStartupWarnings(settingsWarnings);
   renderEditor({ fresh: true });
 
   readline.emitKeypressEvents(process.stdin);
@@ -513,6 +693,9 @@ function startInteractiveRepl() {
   process.stdin.resume();
 
   const closeSession = () => {
+    sessionClosed = true;
+    clearCtrlCExitState();
+    stopThinkingStatus();
     clearInputEditor();
     output.dispose();
     process.stdin.setRawMode(false);
@@ -537,7 +720,7 @@ function startInteractiveRepl() {
       },
       clearScreen() {
         console.clear();
-        renderWelcome(branch);
+        renderWelcome(branch, settings);
         renderEditor({ fresh: true });
       },
       exitSession() {
@@ -592,34 +775,53 @@ function startInteractiveRepl() {
       return;
     }
 
+    const slashToken = normalizedInput.trimStart().split(/\s+/, 1)[0]?.toLowerCase() ?? "";
+    if (
+      normalizedInput.startsWith("/") &&
+      isProcessing &&
+      slashToken !== "/exit" &&
+      slashToken !== "/quit"
+    ) {
+      renderOutputEvent({
+        type: "notice",
+        message: "Wait for the current response before using /help, /clear, or /resume.",
+      });
+      return;
+    }
+
     if (await handleSlashCommand(normalizedInput)) {
       return;
     }
 
-    moveBelowInputEditor();
     const input = currentInput;
     resetInputState();
     closeResumePicker();
-    isProcessing = true;
-
-    try {
-      await orchestrator.processUserInput(input, (event) => output.renderEvent(event));
-      await persistSession();
-    } finally {
-      isProcessing = false;
-      renderEditor({ fresh: true });
-    }
+    renderSubmittedInput(input);
+    pendingInputs.push(input);
+    renderEditor({ fresh: true });
+    void processPendingInputs();
   };
 
   const onKeypress = async (str: string, key: readline.Key) => {
-    if (isProcessing) {
+    if (key.ctrl && key.name === "c") {
+      if (pendingCtrlCExit) {
+        closeSession();
+        return;
+      }
+
+      armCtrlCToExit();
+      renderOutputEvent({
+        type: "notice",
+        message: "Press Ctrl+C again to close.",
+      });
       return;
     }
 
-    if (key.ctrl && key.name === "c") {
-      closeSession();
-      return;
+    if (pendingCtrlCExit) {
+      clearCtrlCExitState();
     }
+
+    lastInputActivityAt = Date.now();
 
     if (resumePicker.visible) {
       if (key.name === "up" || (key.shift && key.name === "tab")) {
@@ -748,16 +950,23 @@ function startInteractiveRepl() {
 }
 
 function startNonInteractiveRepl() {
+  const settings = getCliSettings();
+  const settingsWarnings = getCliSettingsWarnings();
   const orchestrator = new Orchestrator();
-  const output = createCliOutputRenderer();
+  const output = createCliOutputRenderer({
+    animateThinking: settings.ui.animateNonInteractiveThinking,
+  });
   const branch = safeGitBranch();
   let currentSessionId = createSessionId();
   let isProcessing = false;
   let isHandlingLine = false;
   let shouldExitAfterProcessing = false;
   let lineQueue = Promise.resolve();
+  let pendingSigintExit = false;
+  let sigintExitTimer: ReturnType<typeof setTimeout> | undefined;
 
-  renderWelcome(branch);
+  renderWelcome(branch, settings);
+  renderStartupWarnings(settingsWarnings);
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -803,7 +1012,7 @@ function startNonInteractiveRepl() {
       },
       clearScreen() {
         console.clear();
-        renderWelcome(branch);
+        renderWelcome(branch, settings);
       },
       exitSession() {
         shouldExitAfterProcessing = true;
@@ -815,6 +1024,11 @@ function startNonInteractiveRepl() {
     });
 
   const finishNonInteractiveSession = () => {
+    pendingSigintExit = false;
+    if (sigintExitTimer) {
+      clearTimeout(sigintExitTimer);
+      sigintExitTimer = undefined;
+    }
     output.dispose();
     console.log(pc.yellow("Goodbye!"));
     process.exit(0);
@@ -870,6 +1084,12 @@ function startNonInteractiveRepl() {
   };
 
   rl.on("line", (line) => {
+    pendingSigintExit = false;
+    if (sigintExitTimer) {
+      clearTimeout(sigintExitTimer);
+      sigintExitTimer = undefined;
+    }
+
     lineQueue = lineQueue
       .then(() => processLine(line))
       .catch((error) => {
@@ -887,6 +1107,26 @@ function startNonInteractiveRepl() {
         updatePrompt();
         rl.prompt();
       });
+  }).on("SIGINT", () => {
+    if (pendingSigintExit) {
+      shouldExitAfterProcessing = false;
+      rl.close();
+      return;
+    }
+
+    pendingSigintExit = true;
+    console.log(pc.yellow("\nPress Ctrl+C again to close.\n"));
+    updatePrompt();
+    rl.prompt();
+
+    if (sigintExitTimer) {
+      clearTimeout(sigintExitTimer);
+    }
+
+    sigintExitTimer = setTimeout(() => {
+      pendingSigintExit = false;
+      sigintExitTimer = undefined;
+    }, settings.ui.ctrlCConfirmTimeoutMs);
   }).on("close", () => {
     if (isProcessing || isHandlingLine) {
       shouldExitAfterProcessing = true;
